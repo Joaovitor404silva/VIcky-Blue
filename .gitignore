@@ -1,0 +1,28 @@
+# Visual Studio 2015 cache/options directory
+.vs/
+.idea/
+build/
+_Build/vscode-clang/
+_Build/
+cmake-build-debug/
+_PipelineCache/
+CMakeUserPresets.json
+# Game and console content must never be committed (see CONTRIBUTING.md)
+*.rpf
+*.pkg
+*.pfs
+*.self
+*.sprx
+*.prx
+*.elf
+*.sfo
+*.trp
+*.pup
+sce_sys/
+sce_module/
+*[Dd]ump*/
+
+# Local run output
+*.log
+_DownloadData/
+_TempData/

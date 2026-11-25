@@ -1,0 +1,70 @@
+name: Repository policy
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    types: [ opened, edited, reopened, synchronize ]
+  issues:
+    types: [ opened, edited ]
+  issue_comment:
+    types: [ created, edited ]
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    name: Naming and content policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Never run the script from an untrusted PR head.
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Check titles, descriptions and comments
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          rc=0
+          check() { printf '%s\n' "$2" | bash scripts/policy-check.sh text "$1" || rc=1; }
+          check "pull request title" "$PR_TITLE"
+          check "pull request description" "$PR_BODY"
+          check "branch name" "$PR_BRANCH"
+          check "issue title" "$ISSUE_TITLE"
+          check "issue body" "$ISSUE_BODY"
+          check "comment" "$COMMENT_BODY"
+          exit $rc
+
+      - name: Check commits and changed files
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          rc=0
+          cp scripts/policy-check.sh "$RUNNER_TEMP/policy-check.sh"
+          if [ -n "$PR_NUMBER" ]; then
+            git fetch --quiet origin "pull/$PR_NUMBER/head"
+          fi
+          if ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            echo "No usable base commit; skipping range checks."
+            exit 0
+          fi
+          for sha in $(git rev-list "$BASE_SHA..$HEAD_SHA"); do
+            git log -1 --format='%an%n%B' "$sha" \
+              | bash "$RUNNER_TEMP/policy-check.sh" text "commit $sha" || rc=1
+          done
+          git checkout --quiet --detach "$HEAD_SHA"
+          git diff -z --name-only --diff-filter=ACMR "$BASE_SHA" "$HEAD_SHA" \
+            | xargs -0 -r bash "$RUNNER_TEMP/policy-check.sh" files || rc=1
+          exit $rc
