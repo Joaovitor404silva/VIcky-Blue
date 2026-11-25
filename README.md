@@ -1,121 +1,64 @@
 # VIcky-Blue
 
-> [!NOTE]
-> VIcky-Blue is a fork of [KytyPS5](https://github.com/KytyPS5/KytyPS5) under the same GPL-2.0
-> license. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening an issue or pull request:
-> naming rules and a strict no-game-files rule apply. The upstream README follows.
-
-# KytyPS5
-
-[![Build KytyPS5 (Windows)](https://img.shields.io/github/check-runs/KytyPS5/KytyPS5/main?nameFilter=Build%20KytyPS5%20%28Windows%29&label=Build%20KytyPS5%20%28Windows%29)](https://github.com/KytyPS5/KytyPS5/actions/workflows/build.yml)
-[![Build KytyPS5 (Linux)](https://img.shields.io/github/check-runs/KytyPS5/KytyPS5/main?nameFilter=Build%20KytyPS5%20%28Linux%29&label=Build%20KytyPS5%20%28Linux%29)](https://github.com/KytyPS5/KytyPS5/actions/workflows/build.yml)
-[![Build KytyPS5 (macOS)](https://img.shields.io/github/check-runs/KytyPS5/KytyPS5/main?nameFilter=Build%20KytyPS5%20%28macOS%29&label=Build%20KytyPS5%20%28macOS%29)](https://github.com/KytyPS5/KytyPS5/actions/workflows/build.yml)
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20Linux%20x64%20%7C%20macOS%20x86__64-0078D4.svg)](#system-requirements)
-[![Status](https://img.shields.io/badge/status-active%20development-orange.svg)](#current-status)
+[![Status](https://img.shields.io/badge/status-early%20development-orange.svg)](#current-status)
 [![License](https://img.shields.io/badge/license-GPL--2.0-blue.svg)](LICENSE)
 
-**[Weekly updates](https://github.com/KytyPS5/KytyPS5/discussions/862)** — game progress, recent fixes, and ongoing development.
-
-**[Development on Discord](https://discord.gg/UNrkMqGaBg)** — KytyPS5 development.
-
-KytyPS5 is a free and open-source PlayStation 5 translation layer written in C++ for Windows
-and Linux, with experimental macOS support. It is based on a heavily modified version of
-[Kyty](https://github.com/InoriRus/Kyty). The project is in active development, and behavior
-can change significantly between builds.
+**VIcky-Blue is a single-title project.** It is a fork of
+[KytyPS5](https://github.com/KytyPS5/KytyPS5), a free and open-source PlayStation 5 translation
+layer written in C++, and it exists to get one specific PlayStation 5 game running. It is not a
+general-purpose emulator and does not try to be one.
 
 > [!IMPORTANT]
-> KytyPS5 is not affiliated with Sony Interactive Entertainment or PlayStation. The project does
-> not distribute games or copyrighted system software. Use only game files that you have obtained
-> legally.
+> **The target title is never named in this repository.** Not in code, comments, commit
+> messages, branch names, pull requests, issues, discussions, logs or screenshots. Refer to it
+> as "the target title". See [CONTRIBUTING.md](CONTRIBUTING.md); the rule is enforced
+> automatically and by the maintainers.
+
+## What single-title means here
+
+- **One game decides everything.** Work is prioritised by what the target title needs to boot,
+  render and run. A fix is in scope when it moves that title forward.
+- **Other games are out of scope.** They may work, since the upstream code is still here, but
+  compatibility with them is not tested, not tracked and not a reason to accept or reject a
+  change. Regressions in other titles are acceptable when the target title benefits.
+- **Title-specific workarounds are welcome.** Temporary hacks, skips and debug switches that
+  would not be accepted upstream can land here, as long as they are clearly marked as such.
+- **General-purpose improvements belong upstream.** If a change helps every game, please
+  contribute it to [KytyPS5](https://github.com/KytyPS5/KytyPS5), where it reaches more people.
+  For general emulation, compatibility lists and support, use upstream.
+
+> [!IMPORTANT]
+> VIcky-Blue is not affiliated with Sony Interactive Entertainment, PlayStation, or the
+> publisher or developer of any game. The project does not distribute games or copyrighted
+> system software, and **no game files are accepted in this repository**. Use only game files
+> that you have obtained legally.
 
 ## Current Status
 
-Development is currently focused on expanding game compatibility and improving boot reliability.
-External low-level emulation modules are neither required nor planned.
+Early development. The target title does not run yet; current work is on getting further
+through boot. Expect crashes, missing rendering and temporary workarounds.
 
-Windows and Linux are the primary target platforms and receive the most testing.
-
-macOS support is experimental. The emulator is built for x86-64 and runs on Apple Silicon under
-Rosetta 2, with Vulkan provided by MoltenVK. A small number of titles have been verified in-game
-on Apple Silicon hardware; see [Building on macOS](#building-on-macos).
-
-Community game test results are available in the
-[KytyPS5 Compatibility List](https://kytyps5.github.io/compatibility).
+Windows is where the fork is developed and tested. The Linux and macOS code paths are inherited
+from upstream and are not tested here.
 
 ## Bugs and Issues
 
-Compatibility, stability, and performance can vary between versions. You may encounter crashes
-or graphical glitches, so please include the version you tested when reporting an issue.
-
-## Screenshots
-
-<table align="center">
-  <tr>
-    <td align="center">
-      <strong>Cyberpunk 2077</strong><br>
-      <img src="docs/screenshots/ps5-07.png" width="300" alt="Cyberpunk 2077 running in KytyPS5">
-    </td>
-    <td align="center">
-      <strong>MLB The Show 23</strong><br>
-      <img src="docs/screenshots/ps5-08.png" width="300" alt="MLB The Show 23 running in KytyPS5">
-    </td>
-  </tr>
-  <tr>
-    <td align="center">
-      <strong>Astro Bot</strong><br>
-      <img src="docs/screenshots/ps5-01.png" width="300" alt="Astro Bot running in KytyPS5">
-    </td>
-    <td align="center">
-      <strong>Saros</strong><br>
-      <img src="docs/screenshots/ps5-03.png" width="300" alt="Saros running in KytyPS5">
-    </td>
-  </tr>
-  <tr>
-    <td align="center">
-      <strong>Neptunia ReVerse</strong><br>
-      <img src="docs/screenshots/ps5-04.png" width="300" alt="Neptunia ReVerse running in KytyPS5">
-    </td>
-    <td align="center">
-      <strong>SILENT HILL: The Short Message</strong><br>
-      <img src="docs/screenshots/ps5-05.png" width="300" alt="SILENT HILL: The Short Message running in KytyPS5">
-    </td>
-  </tr>
-  <tr>
-    <td align="center">
-      <strong>Demon's Souls</strong><br>
-      <img src="docs/screenshots/ps5-02.png" width="300" alt="Demon's Souls running in KytyPS5">
-    </td>
-    <td align="center">
-      <strong>UFC 6</strong><br>
-      <img src="docs/screenshots/ps5-06.jpg" width="300" alt="UFC 6 running in KytyPS5">
-    </td>
-  </tr>
-</table>
-
-<p align="center"><em>And many more...</em></p>
-
-## Notable Forks
-
-These community forks bring KytyPS5 to other platforms.
-
-- [Cosmo/KytyPS5](https://github.com/Cosmo/KytyPS5) — Xbox Series X: Direct3D 12 renderer, sleek
-  controller-first interface, and local multiplayer for up to four players.
+Report only problems that affect the target title, include the commit you tested, and scrub the
+title's name and any dump paths from logs and screenshots before attaching them. Never attach
+game files.
 
 ## Contributing
 
-Testing games and submitting detailed bug reports are useful ways to contribute. Search existing
-issues first, then use the **Game Emulation Status Report** template and attach the complete log file.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) first. In short:
 
-**Pull requests for general fixes, architectural changes, or refactoring that do not address a concrete bug or launch problem in a specific game will be automatically closed.**
+- never name the target title or its series, anywhere;
+- never commit, attach or link game files, dumps, firmware or keys;
+- AI-assisted contributions are allowed.
 
-**Large, unfocused commits or pull requests that bundle unrelated changes without a clear purpose or game-related benefit will also be automatically closed.**
-
-Keep each PR focused. Name the affected game, describe the exact problem, and provide evidence showing what the change fixes.
-
-Windows and Linux are the primary target platforms, so changes to shared code should not
-introduce regressions on either platform. Changes confined to a platform's own code paths
-only need to build on that platform. Because KytyPS5 is still evolving quickly, consider
-opening an issue before starting a large change.
+Keep each pull request focused on one problem the target title hits. Describe the exact
+problem and show evidence of what the change fixes, such as a scrubbed log excerpt. Changes
+with no benefit to the target title should go upstream instead.
 
 ### Formatting
 
@@ -441,18 +384,14 @@ debugging options.
 
 ### AI Use
 
-AI tools may be used for research, reverse engineering, and development assistance. Contributors
-must fully understand, review, and test all code they submit and remain responsible for its
-correctness. Repository communication, including pull-request descriptions, code comments, and
-issue comments, must come from the human contributor rather than an autonomous AI agent.
-
-Pull requests that include AI-assisted or AI-generated work should disclose the scope of the AI
-involvement and describe the human review and testing performed before submission. Unverified or
-untested generated changes may be closed without review.
+AI tools may be used freely, including for writing code, tests, documentation, commit messages
+and pull-request descriptions. Contributors must understand, review and test everything they
+submit and remain responsible for its correctness. Everything else in
+[CONTRIBUTING.md](CONTRIBUTING.md) applies to AI-assisted work as well.
 
 ## License
 
-KytyPS5 is licensed under the [GNU General Public License version 2](LICENSE)
+VIcky-Blue, like KytyPS5, is licensed under the [GNU General Public License version 2](LICENSE)
 (`GPL-2.0-only`).
 
 This project is based on the original [Kyty](https://github.com/InoriRus/Kyty), which was released
