@@ -1,0 +1,65 @@
+name: Work overview
+
+# Rebuilds the pinned "Start here" issue (label: overview) from the open issues, so the list
+# of what needs doing never has to be maintained by hand.
+on:
+  issues:
+    types: [ opened, closed, reopened, labeled, unlabeled, milestoned, demilestoned, assigned, unassigned, deleted ]
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+concurrency:
+  group: overview
+  cancel-in-progress: true
+
+jobs:
+  overview:
+    name: Update the overview issue
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rebuild the list
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          target=$(gh issue list --state open --label overview --limit 1 --json number --jq '.[0].number // empty')
+          if [ -z "$target" ]; then
+            echo "No open issue carries the overview label; nothing to update."
+            exit 0
+          fi
+          gh issue list --state open --limit 500 \
+            --json number,labels,milestone,assignees > issues.json
+          {
+            echo "This is the list of what needs doing. It is rebuilt automatically whenever an issue changes."
+            echo
+            echo "Pick anything without an assignee, comment on it to claim it, and work on its linked branch."
+            echo "[CONTRIBUTING.md](https://github.com/$GH_REPO/blob/main/CONTRIBUTING.md#joining-in) has the details."
+            echo "To hear about new problems as they are found, use **Watch → Custom → Issues** on the repository."
+            echo
+            jq -r '
+              def has($l): [.labels[].name] | index($l) != null;
+              def line:
+                "- [ ] #\(.number)"
+                + (if has("blocker") then " — **blocker**" else "" end)
+                + (if has("needs-triage") then " — needs triage" else "" end)
+                + (if has("good first issue") then " — good first issue" else "" end)
+                + (if (.assignees | length) > 0
+                   then " — taken by " + ([.assignees[].login | "@" + .] | join(", "))
+                   else "" end);
+              map(select(has("overview") | not))
+              | map(. + {group: (if has("needs-triage") then "New, not yet reviewed"
+                                 else (.milestone.title // "Project upkeep") end)})
+              | group_by(.group)
+              | sort_by(if .[0].group == "New, not yet reviewed" then "0"
+                        elif .[0].group == "Project upkeep" then "zz"
+                        else "1" + .[0].group end)
+              | .[]
+              | "## \(.[0].group)",
+                (sort_by([(has("blocker") | not), .number]) | .[] | line),
+                ""
+            ' issues.json
+            echo "Rules that apply everywhere, including in comments here: never name the target title or its series, and never post game files."
+          } > body.md
+          gh issue edit "$target" --body-file body.md

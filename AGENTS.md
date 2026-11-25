@@ -33,3 +33,10 @@ Work is tracked as GitHub issues with milestones; see the "Joining in" section o
 (`<area>/<issue number>-<short-name>`) and merge it through a pull request that closes the
 issue. When you find a new blocker or add a temporary workaround, open an issue for it with
 the matching label, and create a linked branch with `gh issue develop`.
+
+## Feedback loop
+
+After every test run of the target title, run `python scripts/triage-log.py <log>` and act on
+the result: file new problems (`--file-issues`, or by hand for things the script cannot see),
+close issues the run shows are fixed, and update the README status if the title got further.
+When a new failure pattern shows up in logs, teach `scripts/triage-log.py` to recognise it.

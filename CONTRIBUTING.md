@@ -64,6 +64,41 @@ starting, so it shows up in the list.
 You need your own legally obtained copy of the target title to test. Nobody here can give you
 game files or tell you where to get them.
 
+## Reporting what you find
+
+Every test run should feed back into the issue list, so that the list always shows what is
+actually broken.
+
+1. Run the target title and keep the emulator's output in a log file.
+2. Run the triage script on it:
+
+   ```sh
+   python scripts/triage-log.py boot.log
+   ```
+
+   It prints the problems it recognises: the fatal error, unimplemented library functions,
+   skipped shaders, sampler fallbacks and event waits that never complete. Paths are removed
+   and the log itself never leaves your machine.
+3. Collaborators can file the result directly:
+
+   ```sh
+   python scripts/triage-log.py boot.log --file-issues
+   ```
+
+   A problem nobody has reported yet becomes a new issue labelled `needs-triage`. One that
+   already has an open issue gets a "still present" comment, and one whose issue was closed is
+   reopened as a regression. Everyone else opens a *Blocker or bug* issue and pastes the
+   report.
+4. A maintainer reviews each `needs-triage` issue: confirms it, adds where to look, sets a
+   milestone and labels, and removes `needs-triage`.
+
+The pinned "Start here" issue is rebuilt automatically from the open issues whenever one
+changes, with new and unreviewed problems at the top. To be notified about new problems, use
+**Watch → Custom → Issues** on the repository.
+
+Something the script does not recognise, such as wrong rendering or a hang with no error,
+still needs an issue written by hand.
+
 ## Enforcement
 
 `scripts/policy-check.sh` implements rules 1 and 2. It runs:
