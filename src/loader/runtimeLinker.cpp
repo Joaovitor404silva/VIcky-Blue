@@ -100,7 +100,7 @@ static std::vector<uint64_t>            g_unresolved_stub_thunk_pages;
 static uint64_t                         g_unresolved_stub_thunk_offset = 0;
 static constexpr uint64_t               UNRESOLVED_STUB_PAGE_SIZE      = 4096;
 
-static KYTY_SYSV_ABI uint64_t UnresolvedImportStub(uint64_t record_id);
+static KYTY_SYSV_ABI uint64_t UnresolvedImportStub(uint64_t record_id, const uint64_t* regs);
 
 static bool PatchGuestMemory64(uint64_t vaddr, uint64_t value) {
 	auto* ptr     = reinterpret_cast<uint64_t*>(vaddr);
@@ -110,7 +110,7 @@ static bool PatchGuestMemory64(uint64_t vaddr, uint64_t value) {
 }
 
 static uint64_t AllocateUnresolvedImportThunk(uint64_t record_id) {
-	constexpr uint64_t thunk_size = 34;
+	constexpr uint64_t thunk_size = 46;
 
 	if (g_unresolved_stub_thunk_pages.empty() ||
 	    g_unresolved_stub_thunk_offset + thunk_size > UNRESOLVED_STUB_PAGE_SIZE) {
@@ -127,17 +127,25 @@ static uint64_t AllocateUnresolvedImportThunk(uint64_t record_id) {
 	g_unresolved_stub_thunk_offset += thunk_size;
 
 	uint8_t bytes[thunk_size] = {
-	    0x48, 0x83, 0xec, 0x08,               // sub rsp, 8
+	    0x48, 0x8b, 0x04, 0x24,               // mov rax, [rsp] (return address)
+	    0x41, 0x51,                           // push r9
+	    0x41, 0x50,                           // push r8
+	    0x51,                                 // push rcx
+	    0x52,                                 // push rdx
+	    0x56,                                 // push rsi
+	    0x57,                                 // push rdi
+	    0x50,                                 // push rax
+	    0x48, 0x89, 0xe6,                     // mov rsi, rsp (saved return address and arguments)
 	    0x48, 0xbf, 0, 0, 0, 0, 0, 0, 0, 0, // mov rdi, record_id
 	    0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, // mov rax, UnresolvedImportStub
 	    0xff, 0xd0,                           // call rax
-	    0x48, 0x83, 0xc4, 0x08,               // add rsp, 8
+	    0x48, 0x83, 0xc4, 0x38,               // add rsp, 56
 	    0x0f, 0x57, 0xc0,                     // xorps xmm0, xmm0
 	    0xc3,                                 // ret
 	};
 	const auto target = reinterpret_cast<uint64_t>(UnresolvedImportStub);
-	std::memcpy(bytes + 6, &record_id, sizeof(record_id));
-	std::memcpy(bytes + 16, &target, sizeof(target));
+	std::memcpy(bytes + 18, &record_id, sizeof(record_id));
+	std::memcpy(bytes + 28, &target, sizeof(target));
 	std::memcpy(code, bytes, sizeof(bytes));
 	Common::VirtualMemory::FlushInstructionCache(reinterpret_cast<uint64_t>(code), thunk_size);
 	return reinterpret_cast<uint64_t>(code);
@@ -165,7 +173,7 @@ static uint64_t RegisterStubbedImport(uint32_t index, const Program* program,
 	return thunk;
 }
 
-static KYTY_SYSV_ABI uint64_t UnresolvedImportStub(uint64_t record_id) {
+static KYTY_SYSV_ABI uint64_t UnresolvedImportStub(uint64_t record_id, const uint64_t* regs) {
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::UnresolvedImportCalls);
 	const auto log_index = g_unresolved_stub_call_log_count.fetch_add(1);
 	if (log_index < 1024) {
@@ -177,6 +185,10 @@ static KYTY_SYSV_ABI uint64_t UnresolvedImportStub(uint64_t record_id) {
 			     log_index, record.patch_vaddr, record.index, record.name.c_str(),
 			     magic_enum::enum_name(record.type), magic_enum::enum_name(record.bind),
 			     record.program.c_str());
+			LOGF("\t caller=0x%016" PRIx64 " rdi=0x%016" PRIx64 " rsi=0x%016" PRIx64
+			     " rdx=0x%016" PRIx64 " rcx=0x%016" PRIx64 " r8=0x%016" PRIx64 " r9=0x%016" PRIx64
+			     "\n",
+			     regs[0], regs[1], regs[2], regs[3], regs[4], regs[5], regs[6]);
 		} else {
 			printf("Unresolved import stub called: <bad-record>\n");
 			LOGF("Unresolved import stub called [%u]: record_id=%" PRIu64 " symbol=<bad-record>\n",
@@ -686,10 +698,15 @@ bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exception_
 			}
 			std::printf("\n");
 		}
-		if (IsReadableRange(info->rsp, 32 * sizeof(uint64_t))) {
+		// A fault near the top of a stack leaves fewer than 32 readable slots.
+		int stack_slots = 32;
+		while (stack_slots > 0 && !IsReadableRange(info->rsp, stack_slots * sizeof(uint64_t))) {
+			stack_slots--;
+		}
+		if (stack_slots > 0) {
 			const auto* stack = reinterpret_cast<const uint64_t*>(info->rsp);
 			std::printf("stack:");
-			for (int i = 0; i < 32; i++) {
+			for (int i = 0; i < stack_slots; i++) {
 				std::printf("%s %016" PRIx64, (i % 4 == 0) ? "\n " : "", stack[i]);
 			}
 			std::printf("\n");
@@ -1297,6 +1314,39 @@ void RuntimeLinker::Execute(const std::filesystem::path& game_patch) {
 		if (!GamePatch::Apply(game_patch, m_programs.empty() ? nullptr : m_programs.front(),
 		                      m_programs)) {
 			EXIT("Failed to apply game cheat\n");
+		}
+	}
+	// Debug aid: KYTY_RAW_PATCH="<hex offset>:<expected hex bytes>:<new hex bytes>[,...]" patches
+	// the main executable at offsets from its base, with no title metadata required.
+	if (const char* raw_patch = std::getenv("KYTY_RAW_PATCH");
+	    raw_patch != nullptr && !m_programs.empty()) {
+		const auto        base = m_programs.front()->base_vaddr;
+		const std::string text(raw_patch);
+		size_t            pos = 0;
+		while (pos < text.size()) {
+			const auto end   = std::min(text.find(',', pos), text.size());
+			const auto entry = text.substr(pos, end - pos);
+			pos              = end + 1;
+			const auto c1 = entry.find(':');
+			const auto c2 = entry.find(':', c1 == std::string::npos ? 0 : c1 + 1);
+			if (c1 == std::string::npos || c2 == std::string::npos) continue;
+			const auto offset = std::stoull(entry.substr(0, c1), nullptr, 16);
+			const auto from   = entry.substr(c1 + 1, c2 - c1 - 1);
+			const auto to     = entry.substr(c2 + 1);
+			if (from.size() != to.size() || from.empty() || (from.size() % 2) != 0) continue;
+			auto* target  = reinterpret_cast<uint8_t*>(base + offset);
+			bool  matches = true;
+			for (size_t i = 0; i < from.size() / 2; i++) {
+				matches &= target[i] == static_cast<uint8_t>(std::stoul(from.substr(i * 2, 2), nullptr, 16));
+			}
+			if (matches) {
+				for (size_t i = 0; i < to.size() / 2; i++) {
+					target[i] = static_cast<uint8_t>(std::stoul(to.substr(i * 2, 2), nullptr, 16));
+				}
+				Common::VirtualMemory::FlushInstructionCache(base + offset, to.size() / 2);
+			}
+			std::printf("Raw patch at +0x%llx: %s\n", static_cast<unsigned long long>(offset),
+			            matches ? "applied" : "expected bytes not found, skipped");
 		}
 	}
 	CreateThreadTls();
