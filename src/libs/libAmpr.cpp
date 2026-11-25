@@ -552,6 +552,7 @@ constexpr uint64_t AMM_MAP_DIRECT_RECORD_SIZE    = 0x30;
 constexpr uint64_t AMM_UNMAP_RECORD_SIZE         = 0x20;
 constexpr uint64_t AMM_MAP_AS_PRT_RECORD_SIZE    = 0x0c;
 constexpr uint64_t AMM_REMAP_RECORD_SIZE         = 0x10;
+constexpr uint64_t AMM_ALLOCATE_PA_RECORD_SIZE   = 0x10;
 constexpr uint64_t AMM_PAGE_SIZE                 = 0x4000;
 constexpr int      AMM_MAP_FIXED                 = 0x10;
 constexpr int      AMM_USAGE_DIRECT              = 0;
@@ -577,6 +578,7 @@ enum class AmmCommandKind : uint32_t {
 	MapDirect,
 	MapAsPrt,
 	RemapIntoPrt,
+	AllocatePaForPrt,
 	Unmap,
 };
 
@@ -1022,7 +1024,9 @@ static int ExecuteAmmMapCommand(const CommandBufferState::AmmMapCommand& command
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
 
-	if (command.kind == AmmCommandKind::MapAuto) {
+	// AllocatePaForPrt backs part of a PRT range from the automatic pool, like an automatic map.
+	if (command.kind == AmmCommandKind::MapAuto ||
+	    command.kind == AmmCommandKind::AllocatePaForPrt) {
 		return LibKernel::Memory::MapAutomaticMemory(command.va, command.size, command.type,
 		                                             NormalizeAmmProtection(command.prot));
 	}
@@ -2273,6 +2277,31 @@ static int KYTY_SYSV_ABI AmmCommandBufferUnmapToPrt(void* command_buffer, uint64
 	return LibKernel::Memory::KernelWriteUnmapToPrtCommand(record, va, size, nullptr);
 }
 
+static int KYTY_SYSV_ABI AmmCommandBufferAllocatePaForPrt(void* command_buffer, uint64_t va,
+                                                          uint64_t size, int32_t type,
+                                                          int32_t prot) {
+	PRINT_NAME();
+
+	LOGF("\t va = 0x%016" PRIx64 ", size = 0x%016" PRIx64 ", type = %d, prot = 0x%x\n", va, size,
+	     type, prot);
+
+	if (command_buffer == nullptr || !ValidateAmmMapArgs(va, size)) {
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	CommandBufferState::AmmMapCommand command {};
+	command.kind = AmmCommandKind::AllocatePaForPrt;
+	command.va   = va;
+	command.size = size;
+	command.type = type;
+	command.prot = prot;
+
+	return AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer), command,
+	                           AMM_ALLOCATE_PA_RECORD_SIZE)
+	           ? OK
+	           : LibKernel::KERNEL_ERROR_EBUSY;
+}
+
 static int KYTY_SYSV_ABI AmmCommandBufferUnmap(void* command_buffer, uint64_t va, uint64_t size) {
 	PRINT_NAME();
 
@@ -2476,6 +2505,7 @@ LIB_DEFINE(InitAmpr_1) {
 	LIB_FUNC("ZJCgt+aPHAU", Ampr::AmmCommandBufferMapAsPrt);
 	LIB_FUNC("0Xo9g4goDXU", Ampr::AmmCommandBufferRemapIntoPrt);
 	LIB_FUNC("3A2X6OCHtnA", Ampr::AmmCommandBufferUnmapToPrt);
+	LIB_FUNC("d3lKWPM6odc", Ampr::AmmCommandBufferAllocatePaForPrt);
 	LIB_FUNC("M-VFI2DJWQA", Ampr::AmmCommandBufferUnmap);
 	LIB_FUNC("lwS-7y3jcBI", Ampr::AmmSubmitCommandBuffer);
 	LIB_FUNC("NnKhlMJtIsI", Ampr::AmmSubmitCommandBufferAndGetId);
