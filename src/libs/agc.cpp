@@ -2919,6 +2919,15 @@ uint32_t* KYTY_SYSV_ABI AgcDcbAcquireMem(CommandBuffer* buf, uint8_t engine, uin
 	return cmd;
 }
 
+// Patches the engine select (bit 31 of the second DWORD) of an IT_ACQUIRE_MEM packet.
+int KYTY_SYSV_ABI AgcAcquireMemSetEngine(uint32_t* cmd, uint8_t engine) {
+	if (cmd == nullptr) {
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	cmd[1] = (cmd[1] & 0x7fffffffu) | (static_cast<uint32_t>(engine & 0x1u) << 31u);
+	return 0;
+}
+
 uint32_t KYTY_SYSV_ABI AgcDcbAcquireMemGetSize() {
 	PRINT_NAME();
 
@@ -3003,6 +3012,29 @@ uint32_t* KYTY_SYSV_ABI AgcAcbJump(CommandBuffer* buf, uint8_t cache_policy,
 
 uint32_t KYTY_SYSV_ABI AgcAcbJumpGetSize() {
 	return 0x10u;
+}
+
+// AcbEventWrite always emits the two-DWORD form.
+uint32_t KYTY_SYSV_ABI AgcAcbEventWriteGetSize() {
+	return 2u * 4u;
+}
+
+uint32_t KYTY_SYSV_ABI AgcAcbRewindGetSize() {
+	return AgcDcbRewindGetSize();
+}
+
+// IT_ATOMIC_MEM: header plus eight body DWORDs.
+uint32_t KYTY_SYSV_ABI AgcDcbAtomicMemGetSize() {
+	return 9u * 4u;
+}
+
+uint32_t KYTY_SYSV_ABI AgcAcbAtomicMemGetSize() {
+	return AgcDcbAtomicMemGetSize();
+}
+
+// Matches the IT_PFP_SYNC_ME packet AgcDcbStallCommandBufferParser writes.
+uint32_t KYTY_SYSV_ABI AgcDcbStallCommandBufferParserGetSize() {
+	return 2u * 4u;
 }
 
 uint32_t* KYTY_SYSV_ABI AgcAcbRewind(CommandBuffer* buf, uint8_t initial_state, uint8_t offload) {
