@@ -36,11 +36,32 @@ general-purpose emulator and does not try to be one.
 
 ## Current Status
 
-Early development. The target title does not run yet; current work is on getting further
-through boot. Expect crashes, missing rendering and temporary workarounds.
+**Stage: boots, no image yet.** The target title loads, starts its threads and begins compiling
+shaders, then the emulator aborts on a shader instruction it cannot decode
+([#1](https://github.com/wololo-wololo/VIcky-Blue/issues/1)). No frame has been presented so far.
+
+Known state:
+
+- 18 compute shader dispatches are skipped by a temporary workaround, so rendering would be
+  incomplete even past the current blocker ([#2](https://github.com/wololo-wololo/VIcky-Blue/issues/2), [#3](https://github.com/wololo-wololo/VIcky-Blue/issues/3)).
+- Two system library functions the title calls are not implemented yet
+  ([#5](https://github.com/wololo-wololo/VIcky-Blue/issues/5), [#6](https://github.com/wololo-wololo/VIcky-Blue/issues/6)).
+- The title needs `KYTY_LARGE_MEMORY=1` set to get enough guest memory ([#9](https://github.com/wololo-wololo/VIcky-Blue/issues/9)).
 
 Windows is where the fork is developed and tested. The Linux and macOS code paths are inherited
 from upstream and are not tested here.
+
+## Help wanted
+
+Everything that needs doing is tracked as an issue, grouped into milestones:
+
+- [Open issues](https://github.com/wololo-wololo/VIcky-Blue/issues), with [`blocker`](https://github.com/wololo-wololo/VIcky-Blue/labels/blocker) marking what stops progress
+  right now and [`good first issue`](https://github.com/wololo-wololo/VIcky-Blue/labels/good%20first%20issue) marking easy ways in
+- [Milestones](https://github.com/wololo-wololo/VIcky-Blue/milestones): first frame, menus, in-game
+
+Each issue says what the goal is, where to look in the code and when it counts as done, and has
+a branch ready to work on. [CONTRIBUTING.md](CONTRIBUTING.md#joining-in) explains how to pick
+one up.
 
 ## Bugs and Issues
 

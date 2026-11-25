@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: General emulation problems and other games
+    url: https://github.com/KytyPS5/KytyPS5
+    about: This fork only tracks one title. Everything else belongs upstream.

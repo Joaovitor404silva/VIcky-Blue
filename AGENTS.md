@@ -25,3 +25,11 @@ The "Current Status" section of [README.md](README.md) is the project's status r
 it in the same commit or push whenever the state of the project changes: how far the target
 title gets (boot, menus, in-game), what is known broken, which temporary workarounds are in
 place, and which platforms are tested.
+
+## Issues and branches
+
+Work is tracked as GitHub issues with milestones; see the "Joining in" section of
+[CONTRIBUTING.md](CONTRIBUTING.md). Do each piece of work on the branch linked to its issue
+(`<area>/<issue number>-<short-name>`) and merge it through a pull request that closes the
+issue. When you find a new blocker or add a temporary workaround, open an issue for it with
+the matching label, and create a linked branch with `gh issue develop`.

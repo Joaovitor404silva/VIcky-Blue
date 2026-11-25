@@ -1,0 +1,48 @@
+name: Blocker or bug
+description: Something stops the target title from booting, rendering or running correctly.
+title: "area: short description"
+labels: ["blocker"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not name the target title or its series** in the title, text, logs or screenshots,
+        and **never attach game files**. Scrub dump paths and window titles from anything you
+        paste. See CONTRIBUTING.md.
+  - type: input
+    id: commit
+    attributes:
+      label: Commit tested
+      placeholder: "Example: 721a43e2"
+    validations:
+      required: true
+  - type: dropdown
+    id: stage
+    attributes:
+      label: How far does the target title get?
+      options:
+        - Crashes before any output
+        - Boots, no image
+        - Shows an image, then stops
+        - Reaches menus
+        - In-game
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: The exact error or behaviour, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Scrubbed log excerpt
+      description: The relevant lines only, with the title's name and dump paths removed.
+      render: text
+  - type: input
+    id: host
+    attributes:
+      label: Host system
+      placeholder: "OS, CPU, GPU and driver version"

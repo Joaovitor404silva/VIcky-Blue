@@ -1,0 +1,26 @@
+name: Task
+description: A concrete piece of work someone can pick up.
+title: "area: short description"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not name the target title or its series**, and never attach game files.
+        See CONTRIBUTING.md.
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What should be true when this is done, and why the target title needs it.
+    validations:
+      required: true
+  - type: textarea
+    id: where
+    attributes:
+      label: Where to look
+      description: Files, functions, log lines or documentation that help someone get started.
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      description: How a reviewer can tell the work is finished.
