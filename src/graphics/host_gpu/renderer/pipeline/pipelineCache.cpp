@@ -18,6 +18,7 @@
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/Tessellation.h"
 #include "graphics/shader/recompiler/ir/Serialize.h"
+#include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "kernel/memory.h"
 #include "loader/systemContent.h"
@@ -361,16 +362,28 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	}
 	auto* current = entry == m_program_cache.end() ? &source : entry->second.call_source.get();
 	ShaderRecompiler::TranslateResult translated;
-	if (current != nullptr) {
-		if (!current->calls.empty()) {
-			if (entry == m_program_cache.end()) ShaderRecompiler::RefreshShaderSource(*current, runtime);
-			translated = ShaderRecompiler::TranslateProgram(current->linked->decoded, options);
-			translated.program.source_reads = current->reads;
+	try {
+		if (current != nullptr) {
+			if (!current->calls.empty()) {
+				if (entry == m_program_cache.end()) ShaderRecompiler::RefreshShaderSource(*current, runtime);
+				translated = ShaderRecompiler::TranslateProgram(current->linked->decoded, options);
+				translated.program.source_reads = current->reads;
+			} else {
+				translated = ShaderRecompiler::TranslateProgram(current->decoded, options);
+			}
 		} else {
-			translated = ShaderRecompiler::TranslateProgram(current->decoded, options);
+			translated = ShaderRecompiler::TranslateProgram(params.code, options);
 		}
-	} else {
-		translated = ShaderRecompiler::TranslateProgram(params.code, options);
+	} catch (const ShaderRecompiler::IR::UnsupportedComputeShader&) {
+		PipelineCacheLog("!!! TEMPORARY COMPUTE DISPATCH SKIP !!! shader=0x{:016x} "
+		                 "reason=resource tracking failed; rendering is incomplete",
+		                 params.hash);
+		if (entry == m_program_cache.end()) {
+			m_program_cache.emplace(m_lookup_key, Program {.skip_dispatch = true});
+		} else {
+			entry->second.skip_dispatch = true;
+		}
+		return nullptr;
 	}
 	if (entry == m_program_cache.end()) {
 		auto retained = !source.calls.empty()
@@ -381,8 +394,17 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 		    .resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program),
 		}).first;
 		auto& program = entry->second;
-		EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
-		    program.resource_plan, runtime, program.resources, program.specialization));
+		if (!ShaderRecompiler::IR::MaterializeResources(
+		        program.resource_plan, runtime, program.resources, program.specialization)) {
+			// A compute shader whose resources cannot be specialized is skipped like an
+			// unsupported callable target; any other stage still stops here.
+			EXIT_IF(options.stage != ShaderType::Compute);
+			PipelineCacheLog("!!! TEMPORARY COMPUTE DISPATCH SKIP !!! shader=0x{:016x} "
+			                 "reason=resource specialization failed; rendering is incomplete",
+			                 params.hash);
+			program.skip_dispatch = true;
+			return nullptr;
+		}
 	} else if (source_changed) {
 		entry->second.resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
 		if (const auto* module = entry->second.FindModule<true>(runtime, push_data)) {

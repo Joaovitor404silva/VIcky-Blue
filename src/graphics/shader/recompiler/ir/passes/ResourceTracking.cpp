@@ -643,6 +643,10 @@ private:
 		const auto message =
 		    fmt::format("shader resource tracking: hash=0x{:016x} stage={} pc=0x{:08x} {}",
 		                m_program.shader_hash, StageName(m_program.stage), pc, reason);
+		if (m_program.stage == ShaderType::Compute) {
+			std::printf("%s\n", message.c_str());
+			throw UnsupportedComputeShader {};
+		}
 		EXIT("%s", message.c_str());
 		std::abort();
 	}
@@ -4175,8 +4179,24 @@ private:
 			                [](Value word) { return word.Resolve().GetType() == Type::U32; })) {
 				return false;
 			}
-			Fail(pc, fmt::format("{} dword {} is not a valid runtime value",
-			                     ValueOpcodeName(expected), bad_dword));
+			if (sampler) {
+				// A sampler whose state cannot be traced statically falls back to the default
+				// (all-zero) sampler so the shader still compiles; filtering may be wrong.
+				std::printf("shader resource tracking: hash=0x%016llx pc=0x%08x untraceable sampler, "
+				            "using default sampler\n",
+				            static_cast<unsigned long long>(m_program.shader_hash), pc);
+				for (uint32_t i = 0; i < width; i++) {
+					handle->SetArg(i, Value(0u));
+					descriptor.dwords[i] = Value(0u);
+				}
+				for (auto& entry: m_resolved_handles) {
+					if (entry.handle == handle && entry.pc == pc) entry.source = descriptor;
+				}
+			}
+			if (!sampler || !ValidateSource(descriptor, bad_dword)) {
+				Fail(pc, fmt::format("{} dword {} is not a valid runtime value",
+				                     ValueOpcodeName(expected), bad_dword));
+			}
 		}
 		source = InternSource(descriptor);
 		return true;
