@@ -60,6 +60,9 @@ Known state:
   ([#5](https://github.com/wololo-wololo/VIcky-Blue/issues/5), [#6](https://github.com/wololo-wololo/VIcky-Blue/issues/6)).
 - The title needs `KYTY_LARGE_MEMORY=1` set to get enough guest memory ([#9](https://github.com/wololo-wololo/VIcky-Blue/issues/9)).
 
+Resolved since the last status: the shader decode abort right after the loading logo
+([#1](https://github.com/wololo-wololo/VIcky-Blue/issues/1), fixed in `f5d84d2b`), which was the previous boot blocker.
+
 Windows is where the fork is developed and tested. The Linux and macOS code paths are inherited
 from upstream and are not tested here.
 
