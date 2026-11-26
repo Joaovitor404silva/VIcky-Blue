@@ -812,13 +812,19 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 				const auto  limit =
 				    uint64_t {graphics.GetPhysicalDeviceProperties().limits.maxStorageBufferRange} -
 				    (graphics.StorageMinAlignment() - 1);
-				size = Libs::LibKernel::Memory::ClampRangeSize(
+				size = Libs::LibKernel::Memory::TryClampRangeSize(
 				    address, std::min({size, uint64_t {256} * 1024 * 1024, limit}));
 			} else if (size >= (uint64_t {1} << 30u)) {
 				//  PPSA18026
 				// Finite descriptors can span sparse PRT holes; oversized pool windows are mapped
 				// in pieces, so they end at their last committed range.
-				size = Libs::LibKernel::Memory::ClampRangeSize(address, size, true);
+				size = Libs::LibKernel::Memory::TryClampRangeSize(address, size, true);
+			}
+			if (size == 0) {
+				// The guest can leave a descriptor it does not use pointing at unmapped memory;
+				// hardware faults only on access, so it binds as a null descriptor.
+				source = {};
+				continue;
 			}
 			source = {address, size, cache.FindBuffer(address, size)};
 		}
