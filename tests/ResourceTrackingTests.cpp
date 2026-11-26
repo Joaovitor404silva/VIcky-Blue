@@ -6419,7 +6419,8 @@ void TestBoundedFormattedBufferStore() {
             snapshot.buffers[0].dwords[0] == memory.words[32],
         "destination address refresh was frozen or caused needless specialization");
   for (const auto [word, replacement] : std::array<std::pair<uint32_t, uint32_t>, 9>{
-           {{35u, static_cast<uint32_t>(Prospero::BufferFormat::k32Float) << 12u | 4u},
+           // Float32 is proved by GpuSelectedFormattedFloat32Store; Float16 is not.
+           {{35u, static_cast<uint32_t>(Prospero::BufferFormat::k16Float) << 12u | 4u},
             {35u, static_cast<uint32_t>(Prospero::BufferFormat::k16UNorm) << 12u | 4u},
             {35u, memory.words[35] & ~7u}, {35u, memory.words[35] | (4u << 3u)},
             {32u, memory.words[32] + 1u},
@@ -6531,6 +6532,19 @@ void TestBoundedFormattedBufferStore() {
     Check(!materialize(), "an RGBA16 float store candidate accepted a stride it does not address");
     set_rgba16(8u, Libs::Graphics::DstSel(4, 5, 0, 1));
     Check(!materialize(), "an RGBA16 float store candidate accepted non-identity selects");
+    // A dword store to a one-float record writes the float unchanged.
+    const auto set_f32 = [&](uint32_t stride, uint32_t selects) {
+      set_byte_bounds(stride, 0u, Prospero::BufferFormat::k32Float);
+      for (uint32_t key = 0; key < 8u; ++key) memory.words[32u + key * 4u + 3u] =
+          (static_cast<uint32_t>(Prospero::BufferFormat::k32Float) << 12u) | selects;
+    };
+    set_f32(4u, Libs::Graphics::DstSel(4, 0, 0, 1));
+    Check(materialize() && snapshot.buffers.size() == 8u,
+          "a store to a tight one-float record was refused");
+    set_f32(8u, Libs::Graphics::DstSel(4, 0, 0, 1));
+    Check(!materialize(), "a one-float store candidate accepted a stride it does not address");
+    set_f32(4u, Libs::Graphics::DstSel(4, 4, 0, 1));
+    Check(!materialize(), "a one-float store candidate accepted non-identity selects");
     // A store to a two-byte unsigned record truncates x to 8 bits and zero-fills y.
     const auto set_rg8 = [&](uint32_t stride, uint32_t selects) {
       set_byte_bounds(stride, 0u, Prospero::BufferFormat::k8_8UInt);
