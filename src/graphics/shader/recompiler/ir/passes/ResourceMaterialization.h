@@ -17,7 +17,20 @@ struct ResourceSpecialization {
 		uint32_t               indirect_root                   = BufferResource::NoIndirectBuffer;
 		uint32_t               indirect_mapping_offset         = 0;
 		uint32_t               indirect_search_iterations      = 0;
+		// A large table's candidates take their layout from runtime words, not from these
+		// fields, so the module does not change with the table's rows.
+		bool                   runtime_layout                  = false;
 		bool                   operator==(const Buffer&) const = default;
+	};
+
+	// A layout that the candidates of a runtime-layout table can select at run time. The list
+	// only grows while a program lives, so a layout coming and going does not recompile.
+	struct BufferLayoutClass {
+		uint32_t               root    = 0;
+		Prospero::BufferFormat format  = Prospero::BufferFormat::kInvalid;
+		uint32_t               swizzle = DstSel(4, 5, 6, 7);
+		bool                   empty   = false;
+		auto                   operator<=>(const BufferLayoutClass&) const = default;
 	};
 
 	struct Image {
@@ -47,9 +60,16 @@ struct ResourceSpecialization {
 	std::vector<Buffer> buffers;
 	std::vector<Image>  images;
 	std::vector<Sampler> samplers;
+	// Sorted by root, then layout; a candidate's runtime word holds its index among its root's.
+	std::vector<BufferLayoutClass> buffer_layout_classes;
 
 	bool operator==(const ResourceSpecialization&) const = default;
 };
+
+// GPU-selected buffer tables with at least this many distinct candidates take their candidates'
+// layouts from runtime words (ResourceSpecialization::Buffer::runtime_layout).
+uint32_t RuntimeLayoutMinCandidates();
+void     SetRuntimeLayoutMinCandidatesForTests(uint32_t candidates);
 
 // Extracts the descriptor/SRT value graph before resource specialization. The returned plan owns
 // its values and is independent of the translated shader CFG.

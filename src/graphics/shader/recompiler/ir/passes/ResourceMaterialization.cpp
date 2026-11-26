@@ -14,11 +14,24 @@
 #include <fmt/format.h>
 #include <functional>
 #include <numeric>
-#include <unordered_set>
 #include <unordered_map>
 
+#include <unordered_set>
 namespace Libs::Graphics::ShaderRecompiler::IR {
 namespace {
+
+namespace {
+uint32_t g_runtime_layout_min_candidates = 256u;
+} // namespace
+
+uint32_t RuntimeLayoutMinCandidates() {
+	return g_runtime_layout_min_candidates;
+}
+
+void SetRuntimeLayoutMinCandidatesForTests(uint32_t candidates) {
+	g_runtime_layout_min_candidates = candidates;
+}
+
 
 constexpr uint64_t AddressMask            = 0x0000ffffffffffffull;
 
@@ -614,7 +627,6 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 	auto& byte_offsets = program.material_keys;
 	const auto children_begin = descriptors.size();
 	const auto root_resource = specializations[resource_index];
-	const auto intern_candidate = [&](const DescriptorValue& candidate) {
 	// Tables reach tens of thousands of distinct descriptors and are materialized per dispatch,
 	// so candidates are interned through a hash map instead of a linear search.
 	struct CandidateHash {
@@ -626,6 +638,7 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 	};
 	std::unordered_map<DescriptorValue, uint32_t, CandidateHash> interned;
 		if (candidate == descriptors[resource_index]) return 0u;
+	const auto intern_candidate = [&](const DescriptorValue& candidate) {
 		const auto ordinal = static_cast<uint32_t>(descriptors.size() - children_begin + 1u);
 		const auto [found, inserted] = interned.try_emplace(candidate, ordinal);
 		if (inserted) {
@@ -856,6 +869,24 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 				root.indirect_mapping_offset = static_cast<uint32_t>(mapping_offset);
 				root.indirect_search_iterations = 0u;
 			}
+				if constexpr (std::is_same_v<Specialization, ResourceSpecialization::Buffer>) {
+					// A large table keeps its candidates' layouts in runtime words after the
+					// mapping, one per ordinal (MaterializeResources fills them), and pads its
+					// candidates to a power of two, so its rows do not specialize the module.
+					const auto children = static_cast<uint32_t>(descriptors.size() - children_begin);
+					if (pointer == nullptr && !program.info.buffers[resource_index].atomic &&
+					    children >= RuntimeLayoutMinCandidates()) {
+						root.runtime_layout = true;
+						auto child = root_resource;
+						child.indirect_root = resource_index;
+						for (auto padded = std::bit_ceil(children); padded > children; --padded) {
+							descriptors.push_back({.dword_count = dword_count});
+							specializations.push_back(child);
+						}
+						snapshot.flattened_srt.resize(
+						    snapshot.flattened_srt.size() + descriptors.size() - children_begin + 1u, 0u);
+					}
+				}
 			return true;
 		}
 		if (selector == nullptr) {
@@ -945,6 +976,21 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 		root.indirect_mapping_offset = static_cast<uint32_t>(mapping_offset);
 		root.indirect_search_iterations = std::bit_width(key_count);
 	}
+		if constexpr (std::is_same_v<Specialization, ResourceSpecialization::Buffer>) {
+			// As for plain tables; the runtime words follow the key/ordinal pairs.
+			const auto children = static_cast<uint32_t>(descriptors.size() - children_begin);
+			if (!program.info.buffers[resource_index].atomic && children >= RuntimeLayoutMinCandidates()) {
+				root.runtime_layout = true;
+				auto child = root_resource;
+				child.indirect_root = resource_index;
+				for (auto padded = std::bit_ceil(children); padded > children; --padded) {
+					descriptors.push_back({.dword_count = dword_count});
+					specializations.push_back(child);
+				}
+				snapshot.flattened_srt.resize(
+				    snapshot.flattened_srt.size() + descriptors.size() - children_begin + 1u, 0u);
+			}
+		}
 	return true;
 }
 
@@ -1796,6 +1842,50 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	specialization.images.resize(program.info.images.size());
 	for (uint32_t i = 0; i < program.info.images.size(); ++i) {
 		const auto& image = program.info.images[i];
+	// Runtime-layout tables: each ordinal's word is its layout class among its root's classes,
+	// with the stride in the high half; the candidates' own entries become canonical.
+	{
+		auto previous = std::move(specialization.buffer_layout_classes);
+		specialization.buffer_layout_classes.clear();
+		const auto original = static_cast<uint32_t>(program.info.buffers.size());
+		for (uint32_t root = 0; root < original; ++root) {
+			if (!specialization.buffers[root].runtime_layout) continue;
+			std::vector<uint32_t> ordinals {root};
+			for (uint32_t i = original; i < specialization.buffers.size(); ++i)
+				if (specialization.buffers[i].indirect_root == root) ordinals.push_back(i);
+			const auto class_of = [&](const ResourceSpecialization::Buffer& buffer) {
+				return ResourceSpecialization::BufferLayoutClass {
+				    .root = root, .format = buffer.descriptor_format, .swizzle = buffer.descriptor_swizzle,
+				    .empty = (buffer.packed_stride & 0x3fffu) == 0u};
+			};
+			std::vector<ResourceSpecialization::BufferLayoutClass> classes;
+			for (const auto& known: previous)
+				if (known.root == root) classes.push_back(known);
+			for (const auto i: ordinals) classes.push_back(class_of(specialization.buffers[i]));
+			std::ranges::sort(classes);
+			classes.erase(std::unique(classes.begin(), classes.end()), classes.end());
+			const auto mapping = specialization.buffers[root].indirect_mapping_offset;
+			const auto pairs = specialization.buffers[root].indirect_search_iterations != 0u;
+			const auto words = mapping + 1u + snapshot.flattened_srt[mapping] * (pairs ? 2u : 1u);
+			if (words + ordinals.size() > snapshot.flattened_srt.size())
+				return SpecializationFail("runtime layout words are missing");
+			for (uint32_t ordinal = 0; ordinal < ordinals.size(); ++ordinal) {
+				auto& buffer = specialization.buffers[ordinals[ordinal]];
+				const auto found = std::ranges::lower_bound(classes, class_of(buffer));
+				snapshot.flattened_srt[words + ordinal] =
+				    static_cast<uint32_t>(found - classes.begin()) | ((buffer.packed_stride & 0x3fffu) << 16u);
+				const auto mapping_offset = buffer.indirect_mapping_offset;
+				const auto iterations     = buffer.indirect_search_iterations;
+				buffer = {.indirect_root = root, .runtime_layout = true};
+				if (ordinal == 0u) {
+					buffer.indirect_mapping_offset    = mapping_offset;
+					buffer.indirect_search_iterations = iterations;
+				}
+			}
+			specialization.buffer_layout_classes.insert(specialization.buffer_layout_classes.end(),
+			                                            classes.begin(), classes.end());
+		}
+	}
 		specialization.images[i] = {
 		    .numeric_class = image.numeric_class,
 		    .dimension = image.dimension,
@@ -1956,6 +2046,23 @@ void ApplyResourceSpecialization(Program& program, const ResourceSpecialization&
 	const auto original_image_count = images.size();
 	images.reserve(specialization.images.size());
 	for (uint32_t index = 0; index < specialization.images.size(); index++) {
+	// A runtime-layout table's first candidates represent its layout classes.
+	for (uint32_t index = 0; index < original_buffer_count; ++index) {
+		auto& root = buffers[index];
+		root.runtime_layout_classes = 0;
+		if (!specialization.buffers[index].runtime_layout) continue;
+		for (const auto& layout: specialization.buffer_layout_classes) {
+			if (layout.root != index) continue;
+			const auto ordinal = root.runtime_layout_classes++;
+			EXIT_IF(ordinal + 1u >= root.indirect_resources.size());
+			auto& candidate              = buffers[root.indirect_resources[ordinal + 1u]];
+			candidate.descriptor_format  = layout.format;
+			candidate.descriptor_swizzle = layout.swizzle;
+			// The stride is a runtime word; any non-zero value marks a non-empty layout.
+			candidate.packed_stride      = layout.empty ? 0u : 4u;
+		}
+		EXIT_IF(root.runtime_layout_classes == 0u);
+	}
 		const auto& source = specialization.images[index];
 		if (index >= images.size()) {
 			EXIT_IF(source.indirect_root >= original_image_count);

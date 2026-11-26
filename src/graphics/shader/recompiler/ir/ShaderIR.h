@@ -141,6 +141,9 @@ struct BufferResource {
 	uint32_t               indirect_mapping_offset    = 0;
 	uint32_t               indirect_search_iterations = 0;
 	std::vector<uint32_t>  indirect_resources;
+	// On the root of a runtime-layout table, the number of layout classes its candidates select
+	// from at run time; candidate k (k < count) carries class k's format, swizzle and emptiness.
+	uint32_t               runtime_layout_classes     = 0;
 
 	bool operator==(const BufferResource& other) const = default;
 };

@@ -45747,13 +45747,18 @@ void CheckGuardedWaterfallBufferRecords(VulkanHarness &vulkan) {
 }
 
 void CheckGpuSelectedFormattedRecordStore(VulkanHarness &vulkan) {
+  struct RestoreRuntimeLayoutThreshold {
+    ~RestoreRuntimeLayoutThreshold() {
+      Libs::Graphics::ShaderRecompiler::IR::SetRuntimeLayoutMinCandidatesForTests(256u);
+    }
+  } restore_threshold;
   constexpr u32 selectors = 128, table = 256, stride = 592, member = 448;
   const u32 alignment = vulkan.RuntimeContext().GetPhysicalDeviceProperties()
                             .limits.minStorageBufferOffsetAlignment;
   const u32 slot = (4096u + alignment - 1u) / alignment * alignment;
   // Modes: signed bytes, RGBA16 float records, unsigned halfwords, and unsigned halfwords in
   // records wider than the format.
-  for (const u32 mode : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 11u, 12u, 13u, 14u, 15u})
+  for (const u32 mode : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 11u, 12u, 13u, 14u, 15u, 16u})
   for (const u32 wave : {32u, 64u}) {
     // Mode 8 stores x to an RGBA16 unsigned record, which truncates x and zero-fills the rest.
     const bool rgba16u = mode == 8u;
@@ -45766,7 +45771,11 @@ void CheckGpuSelectedFormattedRecordStore(VulkanHarness &vulkan) {
     const bool i32 = mode == 11u;
     // Mode 15 mixes Float32 and UInt32 rows: the candidates differ only in format, so each
     // access must be emitted once per format group, not once per candidate.
-    const bool mixed = mode == 15u;
+    const bool mixed = mode == 15u || mode == 16u;
+    // Mode 16 is mode 15 with the candidates' layouts in runtime words, as for the large
+    // tables whose rows change layout between dispatches.
+    const bool runtime_layout = mode == 16u;
+    Libs::Graphics::ShaderRecompiler::IR::SetRuntimeLayoutMinCandidatesForTests(runtime_layout ? 1u : 256u);
     const bool f32 = mode == 10u || i32 || mixed;
     // Modes 12 and 13 convert a dword store to a half or UNorm8 record; mode 14 stores x to a
     // two-dword unsigned record, which zero-fills y.
@@ -45790,6 +45799,7 @@ void CheckGpuSelectedFormattedRecordStore(VulkanHarness &vulkan) {
                 : rgba16u ? "GpuSelectedFormattedRgba16UIntXStore"
                 : rg8 ? "GpuSelectedFormattedRg8UIntStore"
                 : i32 ? "GpuSelectedFormattedSInt32Store"
+                : runtime_layout ? "GpuSelectedRuntimeLayoutMixedStore"
                 : mixed ? "GpuSelectedFormattedMixedStore"
                 : r16f ? "GpuSelectedFormattedFloat16Store"
                 : unorm8 ? "GpuSelectedFormattedUNorm8Store"

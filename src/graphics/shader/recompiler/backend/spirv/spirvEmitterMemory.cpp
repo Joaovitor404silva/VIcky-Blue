@@ -90,8 +90,10 @@ uint32_t BufferByteAddress(ValueEmitContext& ctx, const IR::Inst& inst, const IR
 		index = Binary(state, spv::OpIAdd, TypeU32(state), index, BufferLane(state));
 	}
 	const bool swizzle = stride != 0u && (packed & (1u << 14u)) != 0u;
+	// Runtime-layout candidates have neither swizzle nor ADD_TID (NormalizeIndirectBuffer).
 	return CalculateBufferAddress(state, index, ctx.Arg(inst, 2), ctx.Arg(inst, 3), mem.offset,
-	                              ConstantU32(state, stride),
+	                              state.buffer_runtime_stride != 0u ? state.buffer_runtime_stride
+	                                                                : ConstantU32(state, stride),
 	                              swizzle ? ConstantBool(state, true) : 0u,
 	                              ConstantU32(state, (packed >> 16u) & 3u))
 	    .byte;
@@ -322,7 +324,43 @@ auto EmitBufferAccess(ValueEmitContext& ctx, const IR::Inst& inst, IR::MemoryInf
 	const auto empty_root = shared && buffer.packed_stride == 0u;
 	const auto groups = shared ? IndirectBufferGroups {} : GroupIndirectBufferCandidates(state, root_resource);
 	const auto grouped = !groups.representatives.empty();
+	const auto runtime_classes = buffer.runtime_layout_classes;
 	const auto selected_access = [&]() {
+		if (runtime_classes != 0u) {
+			// A large table's candidates take their layout class and stride from runtime words,
+			// so the module does not depend on its rows: one case per layout class, at the
+			// slot of the selected ordinal (the children's slots are consecutive).
+			const auto& buffers = state.program.info.buffers;
+			const auto word = EmitRuntimeBufferLayout(state, buffer, selected);
+			const auto layout_class = Binary(state, spv::OpBitwiseAnd, TypeU32(state), word,
+			                                 ConstantU32(state, 0xffffu));
+			const auto stride = Binary(state, spv::OpShiftRightLogical, TypeU32(state), word,
+			                           ConstantU32(state, 16u));
+			const auto root_slot = buffer.descriptor_index;
+			const auto child_slot = buffers[buffer.indirect_resources[1]].descriptor_index;
+			for (uint32_t ordinal = 1; ordinal < buffer.indirect_resources.size(); ++ordinal) {
+				if (buffers[buffer.indirect_resources[ordinal]].descriptor_index != child_slot + ordinal - 1u)
+					EXIT("runtime-layout buffer candidates need consecutive descriptor slots\n");
+			}
+			auto slot = EmitAddU32(state, selected, ConstantU32(state, child_slot - 1u));
+			if (root_slot != UINT32_MAX && child_slot != root_slot + 1u) {
+				slot = Select(state, TypeU32(state),
+				    Binary(state, spv::OpIEqual, TypeBool(state), selected, ConstantU32(state, 0u)),
+				    ConstantU32(state, root_slot), slot);
+			}
+			return EmitIndexSwitch(state, layout_class, runtime_classes,
+			                       has_result ? TypeU32Composite(state, components) : 0u, [&](uint32_t c) {
+				const auto representative = buffer.indirect_resources[c + 1u];
+				if (buffers[representative].packed_stride == 0u) return access(representative);
+				struct RuntimeStride {
+					EmitterState& state;
+					~RuntimeStride() { state.buffer_runtime_stride = 0u; }
+				} runtime_stride {state};
+				state.buffer_runtime_stride = stride;
+				mem.resource = representative;
+				return emit(mem, PrepareMemoryResourceAccess(state, mem, slot));
+			});
+		}
 		if (grouped) {
 			// One case per layout group instead of per candidate: a table of a hundred candidates
 			// in a few formats otherwise copies every access a hundred times. The group comes
@@ -382,7 +420,7 @@ auto EmitBufferAccess(ValueEmitContext& ctx, const IR::Inst& inst, IR::MemoryInf
 	};
 	if constexpr (!has_result) {
 		// The candidate switch skips out-of-range keys itself; the group and shared paths do not.
-		if (!shared && !grouped) return selected_access();
+		if (!shared && !grouped && runtime_classes == 0u) return selected_access();
 	}
 	auto valid = Binary(state, spv::OpULessThan, TypeBool(state), selected,
 	                          ConstantU32(state, buffer.indirect_resources.size()));
@@ -418,7 +456,8 @@ uint32_t BufferIndexInBounds(ValueEmitContext& ctx, const IR::Inst& inst,
 	// Bound the original index before multiplying by the stride and adding the field offset.
 	const auto last_record = Binary(state, spv::OpUDiv, TypeU32(state),
 	    Binary(state, spv::OpISub, TypeU32(state), available, ConstantU32(state, 1u)),
-	    ConstantU32(state, buffer.packed_stride & 0x3fffu));
+	    state.buffer_runtime_stride != 0u ? state.buffer_runtime_stride
+	                                      : ConstantU32(state, buffer.packed_stride & 0x3fffu));
 	return AndCondition(state, payload_in_bounds,
 	    AndCondition(state,
 	        Binary(state, spv::OpUGreaterThan, TypeBool(state), bytes, first_byte),

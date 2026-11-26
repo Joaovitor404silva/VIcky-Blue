@@ -114,6 +114,19 @@ uint32_t EmitIndirectResourceIndex(EmitterState& state, uint32_t key, uint32_t m
 	return Select(state, TypeU32(state), match, resource, ConstantU32(state, default_resource));
 }
 
+uint32_t EmitRuntimeBufferLayout(EmitterState& state, const IR::BufferResource& root, uint32_t selected) {
+	const auto mapping = root.indirect_mapping_offset;
+	const auto header = LoadFlattenedSrt(state, ConstantU32(state, mapping));
+	const auto mapping_words = root.indirect_search_iterations != 0u
+	    ? Binary(state, spv::OpShiftLeftLogical, TypeU32(state), header, ConstantU32(state, 1u))
+	    : header;
+	const auto valid = Binary(state, spv::OpULessThan, TypeBool(state), selected,
+	                          ConstantU32(state, static_cast<uint32_t>(root.indirect_resources.size())));
+	const auto ordinal = Select(state, TypeU32(state), valid, selected, ConstantU32(state, 0u));
+	return LoadFlattenedSrt(state, EmitAddU32(state, EmitAddU32(state, mapping_words, ordinal),
+	                                          ConstantU32(state, mapping + 1u)));
+}
+
 uint32_t StorageBufferPackedStride(const EmitterState& state, const IR::MemoryInfo& mem) {
 	if (mem.resource >= state.program.info.buffers.size()) {
 		ExitDescriptorBindingFailure(state, IR::DescriptorBindingKind::Buffers, mem.resource,
@@ -134,7 +147,7 @@ uint32_t SharedIndirectBufferResource(const EmitterState& state, uint32_t resour
 	const auto& buffers = state.program.info.buffers;
 	const auto& root = buffers[resource];
 	if (root.indirect_root != resource || root.descriptor_index == UINT32_MAX ||
-	    root.indirect_resources.size() < 2u) {
+	    root.indirect_resources.size() < 2u || root.runtime_layout_classes != 0u) {
 		return UINT32_MAX;
 	}
 	const auto first = root.packed_stride == 0u ? 1u : 0u;
@@ -157,7 +170,8 @@ uint32_t SharedIndirectBufferResource(const EmitterState& state, uint32_t resour
 IndirectBufferGroups GroupIndirectBufferCandidates(const EmitterState& state, uint32_t resource) {
 	const auto& buffers = state.program.info.buffers;
 	const auto& root = buffers[resource];
-	if (root.indirect_root != resource || root.indirect_resources.size() < 2u) return {};
+	if (root.indirect_root != resource || root.indirect_resources.size() < 2u ||
+	    root.runtime_layout_classes != 0u) return {};
 	// An empty candidate carries no descriptor: it is emitted without one, from its own layout.
 	const auto empty = [&](const IR::BufferResource& buffer) {
 		return buffer.packed_stride == 0u && buffer.source < state.program.descriptor_sources.size() &&
@@ -208,7 +222,9 @@ void EmitMemoryBindings(EmitterState& state) {
 	state.memory_byte_sizes.resize(count);
 	std::vector<bool> dynamic_offsets(count);
 	for (uint32_t resource = 0; resource < state.program.info.buffers.size(); ++resource) {
-		if (SharedIndirectBufferResource(state, resource) == UINT32_MAX) continue;
+		// Runtime-layout candidates load their offsets and sizes per access, by runtime slot.
+		if (state.program.info.buffers[resource].runtime_layout_classes == 0u &&
+		    SharedIndirectBufferResource(state, resource) == UINT32_MAX) continue;
 		for (const auto candidate: state.program.info.buffers[resource].indirect_resources) {
 			dynamic_offsets[state.program.info.buffers[candidate].descriptor_index] = true;
 		}

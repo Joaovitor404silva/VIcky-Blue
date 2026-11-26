@@ -116,6 +116,8 @@ struct EmitterState {
 	std::array<BufferDefinition, 4>                  storage_buffers {};
 	std::vector<uint32_t>                           memory_byte_offsets;
 	std::vector<uint32_t>                           memory_byte_sizes;
+	// While a runtime-layout candidate access is emitted, the id of its runtime stride.
+	uint32_t                                        buffer_runtime_stride = 0;
 	uint32_t                                         bda_pagetable_variable  = 0;
 	uint32_t                                         fault_buffer_variable   = 0;
 	uint32_t                                         bda_pointer_function    = 0;
@@ -444,6 +446,9 @@ struct MemoryResourceAccess {
 
 uint32_t EmitIndirectResourceIndex(EmitterState& state, uint32_t key, uint32_t mapping_offset,
                                    uint32_t search_iterations, uint32_t default_resource);
+// Runtime layout word of a candidate ordinal of a runtime-layout buffer table: its layout class
+// in the low half and its stride in the high half. Out-of-range ordinals read ordinal 0.
+uint32_t EmitRuntimeBufferLayout(EmitterState& state, const IR::BufferResource& root, uint32_t selected);
 // Slot word of an image heap byte offset; offsets past the heap select the null element.
 uint32_t EmitImageHeapEntry(EmitterState& state, uint32_t key, uint32_t mapping_offset);
 MemoryResourceAccess PrepareMemoryResourceAccess(EmitterState& state, const IR::MemoryInfo& mem,

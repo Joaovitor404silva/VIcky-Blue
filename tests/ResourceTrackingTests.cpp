@@ -7816,6 +7816,69 @@ void TestGpuKeyedRawIndexedStore() {
     Check(accepted && snapshot.buffers.size() >= rows, "distinct descriptor table lost candidates");
     Check(ms < 500, "interning distinct candidates is not linear in the table size");
   }
+  // Rows of a large table change layout between dispatches. With one specialization entry per
+  // candidate layout, every new table state compiled a new module (1.5 million SPIR-V words,
+  // seconds of driver time, per frame). A large table keeps its layouts in runtime words
+  // instead, and its candidate count in power-of-two buckets, so the module stays the same.
+  {
+    constexpr uint32_t table = 0x2000u;
+    const auto materialize = [&](uint32_t rows, uint32_t shift, ResourceSnapshot& snapshot,
+                                 ResourceSpecialization& specialization) {
+      LinearTestMemory memory;
+      memory.words.resize((table - memory.base) / 4u + rows * 4u, 0u);
+      const auto first = (table - memory.base) / 4u;
+      for (uint32_t row = 0; row < rows; ++row) {
+        const auto at = first + row * 4u;
+        memory.words[at] = 0x100000u + row * 0x100u;
+        memory.words[at + 1u] = (4u << ((row + shift) % 3u)) << 16u;
+        memory.words[at + 2u] = 0x40u;
+        memory.words[at + 3u] = 0x5204u;
+      }
+      std::array<uint32_t, 8> user_data{table, 16u << 16u, rows, 0x5204u};
+      const SrtRuntime runtime{.user_data = user_data, .userdata = &memory,
+                               .read_specialization_memory = ReadLinearTestMemory};
+      FakeGuestMemory fake(ReadLinearTestMemory, &memory);
+      return MaterializeResources(plan, runtime, snapshot, specialization);
+    };
+    const auto root_of = [](const ResourceSpecialization& specialization) {
+      for (uint32_t i = 0; i < specialization.buffers.size(); ++i)
+        if (specialization.buffers[i].indirect_root == i) return i;
+      return UINT32_MAX;
+    };
+    ResourceSnapshot first_snapshot, second_snapshot, grown_snapshot;
+    ResourceSpecialization first, second, grown;
+    Check(materialize(1000u, 0u, first_snapshot, first) && materialize(1000u, 1u, second_snapshot, second) &&
+              materialize(1010u, 2u, grown_snapshot, grown),
+          "large changing descriptor table did not specialize");
+    Check(first == second, "rows changing layout changed the specialization of a large table");
+    Check(first == grown, "a few more candidates changed the specialization of a large table");
+    Check(first_snapshot.flattened_srt != second_snapshot.flattened_srt,
+          "row layouts are not in the runtime words of a large table");
+    const auto root = root_of(second);
+    Check(root != UINT32_MAX, "large table lost its root");
+    if (root != UINT32_MAX) {
+      const auto& srt = second_snapshot.flattened_srt;
+      const auto mapping = second.buffers[root].indirect_mapping_offset;
+      const auto length = srt[mapping];
+      bool strides = true;
+      for (const uint32_t row : {0u, 1u, 2u, 500u, 999u}) {
+        const auto ordinal = srt[mapping + 1u + row];
+        const auto word = srt[mapping + 1u + length + ordinal];
+        strides &= ordinal != 0u && (word >> 16u) == (4u << ((row + 1u) % 3u));
+      }
+      Check(strides, "runtime layout words do not carry each candidate's stride");
+    }
+    // A small table keeps compile-time layouts.
+    ResourceSnapshot small_snapshot;
+    ResourceSpecialization small;
+    Check(materialize(100u, 0u, small_snapshot, small), "small descriptor table did not specialize");
+    const auto small_root = root_of(small);
+    bool compile_time = small_root != UINT32_MAX && small.buffers.size() > 100u;
+    for (uint32_t i = 0; compile_time && i < small.buffers.size(); ++i)
+      if (small.buffers[i].indirect_root == small_root && i != small_root)
+        compile_time = (small.buffers[i].packed_stride & 0x3fffu) != 0u;
+    Check(compile_time, "small descriptor table lost its compile-time candidate layouts");
+  }
 }
 
 void TestBranchSelectedDescriptorWord() {
