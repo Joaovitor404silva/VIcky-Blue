@@ -58,6 +58,13 @@ Known state:
   ([#2](https://github.com/wololo-wololo/VIcky-Blue/issues/2), [#3](https://github.com/wololo-wololo/VIcky-Blue/issues/3), [#15](https://github.com/wololo-wololo/VIcky-Blue/issues/15)). The failures seen are GPU-selected buffer
   descriptors, indirect buffer tables over the 65536-row limit, and atomic image operations on
   32_32Float and other non-32-bit-integer images.
+  - GPU-selected descriptors read with typed (`tbuffer_load_format_x/xy/xyz/xyzw`) loads now
+    translate. In a boot to the intro the number of distinct skipped shaders went from 231 to
+    26 (4 resource tracking failures, 22 specialization failures). What is left on the tracking
+    side is a store or atomic on a GPU-selected descriptor
+    ([#2](https://github.com/wololo-wololo/VIcky-Blue/issues/2)). The shaders that were skipped
+    are large (about 363k SPIR-V words on average, 131 of 195 over 400k), so a first boot takes
+    much longer to compile them ([#14](https://github.com/wololo-wololo/VIcky-Blue/issues/14)).
 - Two system library functions the title calls are not implemented yet
   ([#5](https://github.com/wololo-wololo/VIcky-Blue/issues/5), [#6](https://github.com/wololo-wololo/VIcky-Blue/issues/6)).
 - The title needs `KYTY_LARGE_MEMORY=1` set to get enough guest memory ([#9](https://github.com/wololo-wololo/VIcky-Blue/issues/9)).

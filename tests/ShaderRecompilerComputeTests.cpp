@@ -37856,6 +37856,160 @@ TestCase BufferLoadFormatXGpuSelectedDescriptors64() {
   return BufferLoadGpuSelectedDescriptors(64u, ShaderOpcode::BUFFER_LOAD_FORMAT_X);
 }
 
+// TBUFFER_LOAD_FORMAT_XY through a descriptor the shader loads at runtime. A tbuffer load carries
+// its format in the instruction, so each format is its own program and the descriptor only supplies
+// the address, stride, bounds and OOB mode. The descriptor format is deliberately wrong (8_UInt)
+// to prove the instruction format is the one that decodes. With `with_index` the load uses
+// IDXEN+OFFEN, otherwise OFFEN only.
+TestCase TBufferLoadFormatXyGpuSelectedDescriptors(const char *name, u32 wave,
+                                                   Prospero::BufferFormat format, bool with_index) {
+  using F = Prospero::BufferFormat;
+  constexpr uint64_t GuestBase = 0x0000000110000000ull;
+  const u32 bytes = ShaderRecompiler::Format::GetFormatInfo(format).byte_size;
+  // +/-32767 and 0 decode to exactly +/-1.0 and 0.0 as SNORM16; the last two dwords are normal floats.
+  constexpr std::array<u32, 4> payload{0x80017fffu, 0x00007fffu, 0x40003c00u, 0x3fc00000u};
+  struct Row {
+    u32 stride, records, mode, index, offset, soffset;
+    bool valid;
+  };
+  std::vector<Row> rows{
+      {0, 64, 3, 0, 0, 0, true},                // raw, address 0
+      {0, 64, 3, 0, bytes, 0, true},            // raw, second element via the offset
+      {0, 64, 3, 0, 0, bytes, true},            // raw, second element via SOFFSET
+      {0, bytes - 1, 3, 0, 0, 0, false},        // raw, record smaller than the format: no transfer
+      {bytes, 4, 0, 0, 0, 0, true},             // structured, index 0
+  };
+  if (with_index) {
+    rows.push_back({bytes, 4, 0, 1, 0, 0, true});  // structured, index 1
+    rows.push_back({bytes, 4, 0, 4, 0, 0, false}); // structured, index == records
+  }
+  const auto address_of = [&](const Row &row) { return row.index * row.stride + row.offset + row.soffset; };
+  const auto read = [&](u32 address, u32 size) {
+    u32 value = 0;
+    for (u32 byte = 0; byte < size; ++byte)
+      value |= ((payload[(address + byte) / 4u] >> (((address + byte) % 4u) * 8u)) & 0xffu) << (byte * 8u);
+    return value;
+  };
+  const auto decode = [&](u32 address, u32 component) -> u32 {
+    switch (format) {
+    case F::k32_32Float:
+    case F::k32_32UInt: return read(address + component * 4u, 4u);
+    case F::k16_16UInt: return read(address + component * 2u, 2u);
+    case F::k8_8UInt: return read(address + component, 1u);
+    case F::k16_16SNorm:
+      return std::bit_cast<u32>(float(static_cast<int16_t>(read(address + component * 2u, 2u))) / 32767.0f);
+    default: return 0u;
+    }
+  };
+  TestCase test;
+  test.name = name;
+  const auto align256 = [](u32 size) { return (size + 255u) & ~255u; };
+  const auto count = static_cast<u32>(rows.size());
+  const auto selection_base = align256(count * 8u);
+  const auto descriptor_base = align256(selection_base + count * 4u);
+  const auto payload_base = align256(descriptor_base + count * 32u);
+  test.initial.resize((payload_base + count * 64u) / 4u);
+  for (u32 i = 0; i < count; ++i) {
+    const auto &input = rows[i];
+    const u32 data_offset = payload_base + i * 64u;
+    const std::array<u32, 8> row{
+        static_cast<u32>(GuestBase + data_offset), 1u | (input.stride << 16u), input.records,
+        4u | (static_cast<u32>(F::k8UInt) << 12u) | (input.mode << 28u),
+        input.index, input.offset, input.soffset, 0u};
+    std::copy(row.begin(), row.end(), test.initial.begin() + descriptor_base / 4u + i * 8u);
+    std::copy(payload.begin(), payload.end(), test.initial.begin() + data_offset / 4u);
+    // Select the row on the GPU, as a descriptor waterfall does.
+    test.initial[selection_base / 4u + i] = count - 1u - i;
+  }
+  for (u32 i = 0; i < count; ++i) {
+    const auto &input = rows[count - 1u - i];
+    for (u32 component = 0; component < 2u; ++component)
+      test.expected.push_back(input.valid ? decode(address_of(input), component) : 0u);
+  }
+  auto &code = test.code;
+  AppendSMovLiteral(&code, 28, 0);
+  AppendSMovLiteral(&code, 29, count);
+  const auto loop = static_cast<u32>(code.size());
+  code.push_back(EncodeVop1(0x01, 30, 28));
+  code.push_back(EncodeVop2(0x1a, 30, InlineU32(2), 30));
+  code.push_back(EncodeMubuf0(0x0c, selection_base));
+  code.push_back(EncodeMubuf1(2, 0, 30));
+  code.push_back(EncodeVop1(0x02, 20, Vgpr(2)));
+  code.push_back(EncodeSop2(0x1e, 20, 20, InlineU32(5)));
+  code.push_back(EncodeSmem0(0x0b, 8, 0));
+  code.push_back(EncodeSmem1(descriptor_base, 20));
+  code.push_back(EncodeVop1(0x01, 21, 12));
+  code.push_back(EncodeVop1(0x01, 22, 13));
+  const auto encoded_format = BufferFormat(format);
+  code.push_back(EncodeMtbuf0(1u, encoded_format & 0xfu, (encoded_format >> 4u) & 0x7u, 0, with_index, true));
+  code.push_back(EncodeMtbuf1(1u, 4, 2, with_index ? 21 : 22, 14));
+  // Output record i is two dwords at i * 8.
+  code.push_back(EncodeVop1(0x01, 30, 28));
+  code.push_back(EncodeVop2(0x1a, 30, InlineU32(3), 30));
+  AppendBufferStoreDword(&code, 4, 30);
+  code.push_back(EncodeVop2(0x25, 31, 255, 30));
+  code.push_back(4u);
+  AppendBufferStoreDword(&code, 5, 31);
+  code.push_back(EncodeSop2(0x00, 28, 28, InlineU32(1)));
+  code.push_back(EncodeSopc(0x0a, 28, 29));
+  code.push_back(EncodeSopp(0x05, loop - static_cast<u32>(code.size()) - 1u));
+  AppendEnd(&code);
+  test.bda_mappings = {{GuestBase, 0}};
+  test.compute_info.threads_num[0] = 1;
+  test.compute_info.threads_num[1] = test.compute_info.threads_num[2] = 1;
+  test.compute_info.wave_size = wave;
+  test.has_compute_info = true;
+  // The typed indirect path shares the scalar formatted load; it must not fall back to a native buffer.
+  test.required_spirv = {"PhysicalStorageBuffer", "OpLoopMerge", "convert_indirect_buffer_format"};
+  return test;
+}
+
+// Typed (tbuffer) loads are the only typed accesses the indirect buffer path accepts, and only
+// formatted ones of 1-4 components. Stores, atomics and untyped wide formatted loads stay native.
+void CheckTypedIndirectBufferLoadSupport() {
+  using namespace ShaderRecompiler::IR;
+  const auto supports = [](bool typed, bool formatted, u32 bits, ValueOpcode opcode) {
+    MemoryInfo memory;
+    memory.typed = typed;
+    memory.formatted = formatted;
+    memory.data_bits = bits;
+    return memory.SupportsIndirectBufferLoad(opcode);
+  };
+  for (const auto opcode : {ValueOpcode::LoadBufferU32, ValueOpcode::LoadBufferU32x2,
+                            ValueOpcode::LoadBufferU32x3, ValueOpcode::LoadBufferU32x4})
+    Require("TypedIndirectBufferLoadSupport", "typed formatted 1-4 components",
+            supports(true, true, 32u, opcode), "typed formatted tbuffer load was rejected");
+  Require("TypedIndirectBufferLoadSupport", "typed requires formatted",
+          !supports(true, false, 32u, ValueOpcode::LoadBufferU32x2), "typed raw load was accepted");
+  Require("TypedIndirectBufferLoadSupport", "typed 8/16-bit", !supports(true, true, 8u, ValueOpcode::LoadBufferU8) &&
+              !supports(true, true, 16u, ValueOpcode::LoadBufferU16), "typed sub-dword load was accepted");
+  Require("TypedIndirectBufferLoadSupport", "typed stores and atomics",
+          !supports(true, true, 32u, ValueOpcode::StoreBufferU32) &&
+              !supports(true, true, 32u, ValueOpcode::BufferAtomicIAdd32), "typed store or atomic was accepted");
+  Require("TypedIndirectBufferLoadSupport", "untyped formatted stays X only",
+          supports(false, true, 32u, ValueOpcode::LoadBufferU32) &&
+              !supports(false, true, 32u, ValueOpcode::LoadBufferU32x2), "untyped formatted rule changed");
+  std::printf("[compute] %-32s ok\n", "TypedIndirectBufferLoadSupport");
+}
+
+struct TBufferLoadXyCase {
+  const char *name;
+  u32 wave;
+  Prospero::BufferFormat format;
+  bool with_index;
+};
+
+// The first two are the shape the target title uses: OFFEN only, packed 16_16 SNORM.
+constexpr std::array TBufferLoadXyCases{
+    TBufferLoadXyCase{"TBufferLoadXySnorm16OffenGpuSelected32", 32u, Prospero::BufferFormat::k16_16SNorm, false},
+    TBufferLoadXyCase{"TBufferLoadXySnorm16OffenGpuSelected64", 64u, Prospero::BufferFormat::k16_16SNorm, false},
+    TBufferLoadXyCase{"TBufferLoadXySnorm16IdxenGpuSelected32", 32u, Prospero::BufferFormat::k16_16SNorm, true},
+    TBufferLoadXyCase{"TBufferLoadXyFloat32IdxenGpuSelected32", 32u, Prospero::BufferFormat::k32_32Float, true},
+    TBufferLoadXyCase{"TBufferLoadXyFloat32OffenGpuSelected64", 64u, Prospero::BufferFormat::k32_32Float, false},
+    TBufferLoadXyCase{"TBufferLoadXyUint16IdxenGpuSelected32", 32u, Prospero::BufferFormat::k16_16UInt, true},
+    TBufferLoadXyCase{"TBufferLoadXyUint8IdxenGpuSelected32", 32u, Prospero::BufferFormat::k8_8UInt, true},
+};
+
 TestCase BufferLoadUshortGpuSelectedDescriptors() {
   return BufferLoadGpuSelectedDescriptors(32u, ShaderOpcode::BUFFER_LOAD_USHORT);
 }
@@ -50488,6 +50642,9 @@ std::vector<TestCase> MakeCases() {
   AddCase(BufferLoadDwordx3GpuSelectedDescriptors);
   AddCase(BufferLoadFormatXGpuSelectedDescriptors);
   AddCase(BufferLoadFormatXGpuSelectedDescriptors64);
+  for (const auto &tbuffer : TBufferLoadXyCases)
+    cases.push_back(TBufferLoadFormatXyGpuSelectedDescriptors(tbuffer.name, tbuffer.wave,
+                                                              tbuffer.format, tbuffer.with_index));
   AddCase(BufferLoadUshortGpuSelectedDescriptors);
   AddCase(BufferLoadUshortGpuSelectedDescriptors64);
   AddCase(BufferLoadUbyteGpuSelectedDescriptors);
@@ -58486,6 +58643,10 @@ int main(int argc, char **argv) {
     CheckSharedIndirectBufferLoads(vulkan);
     RunCase(&vulkan, BufferLoadFormatXGpuSelectedDescriptors());
     RunCase(&vulkan, BufferLoadFormatXGpuSelectedDescriptors64());
+    for (const auto &tbuffer : TBufferLoadXyCases)
+      RunCase(&vulkan, TBufferLoadFormatXyGpuSelectedDescriptors(tbuffer.name, tbuffer.wave,
+                                                                 tbuffer.format, tbuffer.with_index));
+    CheckTypedIndirectBufferLoadSupport();
     RunCase(&vulkan, BufferLoadFormatXRejectsPartialRecord());
     RunCase(&vulkan, BufferLoadFormatXyRejectsPartialRecord());
     RunCase(&vulkan, BufferLoadDwordx4SnapshotsOverlappingAddress());
@@ -59358,6 +59519,7 @@ int main(int argc, char **argv) {
   CheckStorageBufferBindingOver2GiB(vulkan);
   CheckRuntimeBufferRecords(vulkan);
   CheckSharedIndirectBufferLoads(vulkan);
+  CheckTypedIndirectBufferLoadSupport();
   CheckComputeThreadDimensions(vulkan);
   CheckCountedRowImageSelector(vulkan);
   CheckPointerImageTable(vulkan);
