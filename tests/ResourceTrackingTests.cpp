@@ -6505,6 +6505,19 @@ void TestBoundedFormattedBufferStore() {
     Check(!materialize(), "an RGBA32 float store candidate accepted a stride it does not address");
     set_rgba32(16u, Libs::Graphics::DstSel(4, 0, 0, 0));
     Check(!materialize(), "an RGBA32 float store candidate accepted non-identity selects");
+    // A store to a two-halfword unsigned record zero-fills y; its identity selects are 4,5,0,1.
+    const auto set_rg16 = [&](uint32_t stride, uint32_t selects) {
+      set_byte_bounds(stride, 0u, Prospero::BufferFormat::k16_16UInt);
+      for (uint32_t key = 0; key < 8u; ++key) memory.words[32u + key * 4u + 3u] =
+          (static_cast<uint32_t>(Prospero::BufferFormat::k16_16UInt) << 12u) | selects;
+    };
+    set_rg16(4u, Libs::Graphics::DstSel(4, 5, 0, 1));
+    Check(materialize() && snapshot.buffers.size() == 8u,
+          "a store to a tight two-halfword unsigned record was refused");
+    set_rg16(8u, Libs::Graphics::DstSel(4, 5, 0, 1));
+    Check(!materialize(), "a two-halfword store candidate accepted a stride it does not address");
+    set_rg16(4u, Libs::Graphics::DstSel(4, 0, 0, 1));
+    Check(!materialize(), "a two-halfword store candidate accepted non-identity selects");
     // A one-component format's missing channels default to 0,0,0 or 0,0,1, both identity; any
     // other select pattern is still refused.
     set_byte_bounds(1u, 0u, Prospero::BufferFormat::k8UInt);
