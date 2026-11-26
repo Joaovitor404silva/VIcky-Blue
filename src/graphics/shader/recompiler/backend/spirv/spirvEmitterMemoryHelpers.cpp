@@ -186,6 +186,22 @@ IndirectBufferGroups GroupIndirectBufferCandidates(const EmitterState& state, ui
 	return groups;
 }
 
+IndirectGroupMasks SparseIndirectGroupMasks(const std::vector<uint32_t>& group_of, uint32_t group_count) {
+	IndirectGroupMasks masks;
+	masks.words.resize(group_count);
+	std::vector<uint32_t> sizes(group_count, 0u);
+	for (const auto group : group_of) ++sizes[group];
+	masks.default_group = static_cast<uint32_t>(std::max_element(sizes.begin(), sizes.end()) - sizes.begin());
+	for (uint32_t ordinal = 0; ordinal < group_of.size(); ++ordinal) {
+		const auto group = group_of[ordinal];
+		if (group == masks.default_group) continue;
+		auto& words = masks.words[group];
+		if (words.empty() || words.back().first != ordinal / 32u) words.emplace_back(ordinal / 32u, 0u);
+		words.back().second |= 1u << (ordinal % 32u);
+	}
+	return masks;
+}
+
 void EmitMemoryBindings(EmitterState& state) {
 	const auto count = state.program.bindings.descriptor_counts[static_cast<size_t>(IR::DescriptorBindingKind::Buffers)];
 	state.memory_byte_offsets.resize(count);

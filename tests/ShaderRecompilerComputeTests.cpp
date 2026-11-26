@@ -53,6 +53,7 @@
 #include "graphics/shader/recompiler/Tessellation.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvBuilder.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
+#include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/DeadCodeElimination.h"
@@ -1492,6 +1493,28 @@ void ExpectFatal(const char *name, Function function) {
   std::printf("[host]    %-32s ok\n", name);
 }
 #endif
+
+// A GPU-selected table of tens of thousands of candidates in a few dozen layouts picks the
+// group of the selected ordinal from per-group bit masks. Emitting every mask word made each
+// access a compare chain over all words of all groups (six million SPIR-V words for one
+// shader); only the non-zero words of the groups other than the default may be emitted.
+void CheckSparseIndirectGroupMasks() {
+  namespace Emitter = Libs::Graphics::ShaderRecompiler::Spirv::Emitter;
+  std::vector<uint32_t> group_of(40000u, 0u);
+  for (uint32_t ordinal = 0; ordinal < group_of.size(); ++ordinal)
+    group_of[ordinal] = ordinal < 100u ? 1u : ordinal == 39999u ? 2u : 0u;
+  group_of[5] = 0u;
+  const auto masks = Emitter::SparseIndirectGroupMasks(group_of, 3u);
+  Require("SparseIndirectGroupMasks", "default group", masks.default_group == 0u,
+          "the largest group must need no mask");
+  Require("SparseIndirectGroupMasks", "group count", masks.words.size() == 3u, "one list per group");
+  Require("SparseIndirectGroupMasks", "default words", masks.words[0].empty(), "default group got words");
+  using Words = std::vector<std::pair<uint32_t, uint32_t>>;
+  Require("SparseIndirectGroupMasks", "group 1", masks.words[1] == Words{{0u, ~0u & ~(1u << 5u)},
+          {1u, ~0u}, {2u, ~0u}, {3u, 0xfu}}, "wrong or zero words for the first hundred ordinals");
+  Require("SparseIndirectGroupMasks", "group 2", masks.words[2] == Words{{39999u / 32u, 1u << (39999u % 32u)}},
+          "the last ordinal needs exactly one word");
+}
 
 void CheckLeastRecentlyUsedCacheOrdering() {
   Common::LeastRecentlyUsedCache<uint32_t, uint64_t> cache;
@@ -58443,6 +58466,7 @@ int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   EnsureConfigInitialized();
   CheckLeastRecentlyUsedCacheOrdering();
+  CheckSparseIndirectGroupMasks();
   if (argc == 2 && std::strcmp(argv[1], "--mul-hi24-only") == 0) {
     VulkanHarness vulkan;
     RunCase(&vulkan, VectorMulHi24(32));

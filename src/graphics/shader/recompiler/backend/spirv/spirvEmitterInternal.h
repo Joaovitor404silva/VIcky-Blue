@@ -418,6 +418,14 @@ struct IndirectBufferGroups {
 // Empty when the candidates cannot share a group switch.
 IndirectBufferGroups GroupIndirectBufferCandidates(const EmitterState& state, uint32_t resource);
 
+// Membership bit masks that pick a group from a candidate ordinal: the largest group is the
+// default and needs none, and only non-zero 32-bit words are kept, as (word index, mask).
+struct IndirectGroupMasks {
+	uint32_t                                                default_group = 0;
+	std::vector<std::vector<std::pair<uint32_t, uint32_t>>> words;
+};
+IndirectGroupMasks SparseIndirectGroupMasks(const std::vector<uint32_t>& group_of, uint32_t group_count);
+
 void EmitMemoryBindings(EmitterState& state);
 
 uint32_t LdsDwordCount(const EmitterState& state);

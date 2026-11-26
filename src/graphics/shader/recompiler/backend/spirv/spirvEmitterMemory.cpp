@@ -326,23 +326,22 @@ auto EmitBufferAccess(ValueEmitContext& ctx, const IR::Inst& inst, IR::MemoryInf
 		if (grouped) {
 			// One case per layout group instead of per candidate: a table of a hundred candidates
 			// in a few formats otherwise copies every access a hundred times. The group comes
-			// from a membership bit mask per group, indexed by the selected ordinal.
-			const auto count = static_cast<uint32_t>(groups.group_of.size());
-			const auto mask_words = (count + 31u) / 32u;
+			// from a membership bit mask per group, indexed by the selected ordinal; tables reach
+			// tens of thousands of candidates, so only non-zero mask words are emitted and the
+			// largest group is the default without a mask.
+			const auto masks = SparseIndirectGroupMasks(groups.group_of,
+			                                            static_cast<uint32_t>(groups.representatives.size()));
 			const auto word_index = Binary(state, spv::OpShiftRightLogical, TypeU32(state), selected,
 			                               ConstantU32(state, 5u));
 			const auto bit = Binary(state, spv::OpBitwiseAnd, TypeU32(state), selected, ConstantU32(state, 31u));
-			auto group = ConstantU32(state, 0u);
-			for (uint32_t g = 1; g < groups.representatives.size(); ++g) {
-				auto word = 0u;
-				for (uint32_t w = 0; w < mask_words; ++w) {
-					uint32_t mask = 0;
-					for (uint32_t ordinal = w * 32u; ordinal < std::min(count, w * 32u + 32u); ++ordinal)
-						if (groups.group_of[ordinal] == g) mask |= 1u << (ordinal - w * 32u);
-					word = w == 0u ? ConstantU32(state, mask)
-					    : Select(state, TypeU32(state),
-					          Binary(state, spv::OpIEqual, TypeBool(state), word_index, ConstantU32(state, w)),
-					          ConstantU32(state, mask), word);
+			auto group = ConstantU32(state, masks.default_group);
+			for (uint32_t g = 0; g < groups.representatives.size(); ++g) {
+				if (masks.words[g].empty()) continue;
+				auto word = ConstantU32(state, 0u);
+				for (const auto& [w, mask] : masks.words[g]) {
+					word = Select(state, TypeU32(state),
+					    Binary(state, spv::OpIEqual, TypeBool(state), word_index, ConstantU32(state, w)),
+					    ConstantU32(state, mask), word);
 				}
 				const auto member = Binary(state, spv::OpINotEqual, TypeBool(state),
 				    Binary(state, spv::OpBitwiseAnd, TypeU32(state),
