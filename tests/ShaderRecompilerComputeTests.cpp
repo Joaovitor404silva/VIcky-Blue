@@ -46075,6 +46075,96 @@ void CheckIndirectBufferStore(VulkanHarness &vulkan) {
   std::printf("[compute] %-32s ok\n", test.name);
 }
 
+// Atomics through a GPU-selected descriptor must reach the selected candidate, like stores.
+void CheckIndirectBufferAtomic(VulkanHarness &vulkan) {
+  using namespace ShaderRecompiler::IR;
+  for (const auto opcode : {ValueOpcode::BufferAtomicIAdd32, ValueOpcode::BufferAtomicOr32}) {
+    const bool add = opcode == ValueOpcode::BufferAtomicIAdd32;
+    TestCase test;
+    test.name = add ? "IndirectBufferAtomicAdd" : "IndirectBufferAtomicOr";
+    test.initial.assign(64, 0x0000a5a5u);
+    test.storage_buffer_range_bytes = 64;
+    test.storage_buffer_offsets = {12, 108};
+
+    CompiledShader compiled;
+    auto &program = compiled.program;
+    program.stage = ShaderType::Compute;
+    program.wave_size = 32;
+    program.srt_plan_complete = true;
+    program.resource_tracking_complete = true;
+    program.shader_info_complete = true;
+    program.block_storage.push_back(std::make_unique<Block>());
+    auto *block = program.block_storage.back().get();
+    program.blocks.push_back(block);
+
+    auto &lane = block->AppendNewInst(ValueOpcode::LaneId);
+    auto &selector = block->AppendNewInst(ValueOpcode::BitwiseAnd32, {Value(&lane), Value(7u)});
+    auto &key = block->AppendNewInst(ValueOpcode::IAdd32, {Value(&selector), Value(8u)});
+    auto &selection = block->AppendNewInst(ValueOpcode::GetBufferResourceIndex, {Value(&key)});
+    selection.SetFlags<uint32_t>(0u);
+    auto &handle = block->AppendNewInst(ValueOpcode::GetBufferResource,
+        {Value(&selection), Value(0u), Value(0u), Value(0u)});
+    handle.SetFlags<uint32_t>(0u);
+    auto &overflow = block->AppendNewInst(ValueOpcode::IEqual32, {Value(&lane), Value(6u)});
+    auto &index = block->AppendNewInst(ValueOpcode::SelectU32,
+        {Value(&overflow), Value(0x40000000u), Value(&lane)});
+    auto &data = block->AppendNewInst(ValueOpcode::IAdd32, {Value(&lane), Value(0x1000u)});
+    auto &exec = block->AppendNewInst(ValueOpcode::INotEqual32, {Value(&lane), Value(4u)});
+    block->AppendNewInst(opcode, {Value(&handle), Value(&index), Value(0u), Value(0u),
+                                  Value(&data), Value(&exec)});
+    program.memory_info.push_back({.kind = ResourceKind::Buffer, .idxen = true});
+
+    BufferResource root;
+    root.packed_stride = 4;
+    root.written = true;
+    root.indirect_root = 0;
+    root.indirect_mapping_offset = 4;
+    root.indirect_search_iterations = std::bit_width(3u);
+    root.indirect_resources = {0u, 1u};
+    auto candidate = root;
+    candidate.indirect_search_iterations = 0;
+    candidate.indirect_resources.clear();
+    program.info.buffers = {root, candidate};
+    program.descriptor_sources.resize(1);
+    program.descriptor_sources[0].indirect_descriptor =
+        DescriptorSource::IndirectDescriptor{.table_stride = 16, .indexed = true};
+    ShaderComputeInputInfo compute;
+    compute.wave_size = 32;
+    compute.host_subgroup_size = vulkan.SubgroupSize();
+    compute.threads_num[0] = 32;
+    compute.threads_num[1] = compute.threads_num[2] = 1;
+    program.shader_info_complete = false;
+    CollectShaderInfo(program, {.compute = &compute});
+    PushData::Window push_data;
+    compiled.spirv = ShaderRecompiler::Spirv::EmitProgram(program, {.compute = &compute}, push_data);
+    compiled.packed_user_data.resize(program.bindings.ShaderDataDwords());
+    compiled.packed_user_data[program.bindings.memory_offset_dword] = 12u | (108u << 8u);
+    ValidateSpirv(test.name, compiled.spirv);
+    CheckSpirvEmission(test, compiled.spirv);
+
+    for (const bool swapped : {false, true}) {
+      compiled.resources.flattened_srt = {0u, 0u, 0u, 0u, 3u,
+                                         10u, swapped ? 0u : 1u,
+                                         12u, swapped ? 1u : 0u,
+                                         14u, swapped ? 0u : 1u};
+      test.expected = test.initial;
+      for (u32 lane = 0; lane < 16u; ++lane) {
+        // Lane 4 is masked off, lane 6 is out of bounds, other keys have no candidate.
+        if (lane != 2u && lane != 10u && lane != 12u && lane != 14u) continue;
+        const u32 resource = (lane & 7u) == 4u ? swapped : !swapped;
+        auto &word = test.expected[test.storage_buffer_offsets[resource] / 4u + lane];
+        word = add ? word + 0x1000u + lane : word | (0x1000u + lane);
+      }
+      auto output = vulkan.CreateStorageBuffer(test.name, test.initial, test.initial.size());
+      vulkan.Dispatch(test, compiled, output);
+      const auto actual = vulkan.ReadBuffer(test.name, output, test.expected.size());
+      vulkan.DestroyBuffer(&output);
+      CompareWords(test, "atomic key selection, EXEC, bounds and unmapped keys", test.expected, actual);
+    }
+    std::printf("[compute] %-32s ok\n", test.name);
+  }
+}
+
 void CheckFiniteFirstLaneImageChoice(VulkanHarness &vulkan) {
   using O = ShaderOpcode;
   constexpr u32 table = 512u, stride = 440u, poison = 0xdeadbeefu;
@@ -58635,6 +58725,7 @@ int main(int argc, char **argv) {
     for (u32 groups : {1u, 2u}) RunCase(&vulkan, BufferStoreWorkgroupDescriptors(groups));
     CheckFiniteBufferSelection(vulkan);
     CheckIndirectBufferStore(vulkan);
+    CheckIndirectBufferAtomic(vulkan);
     CheckBoundedRecordBufferAccess(vulkan);
     CheckGpuSelectedRecordBufferAccess(vulkan);
     CheckGuardedWaterfallBufferRecords(vulkan);
@@ -59511,6 +59602,7 @@ int main(int argc, char **argv) {
   CheckSigned16ImageStore(vulkan);
   CheckBoundedFormattedBufferCopy(vulkan);
   CheckIndirectBufferStore(vulkan);
+  CheckIndirectBufferAtomic(vulkan);
   CheckBoundedRecordBufferAccess(vulkan);
   CheckGpuSelectedRecordBufferAccess(vulkan);
   CheckGuardedWaterfallBufferRecords(vulkan);

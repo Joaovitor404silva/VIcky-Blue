@@ -62,7 +62,12 @@ Known state:
     translate. In a boot to the intro the number of distinct skipped shaders went from 231 to
     26 (4 resource tracking failures, 22 specialization failures). What is left on the tracking
     side is a store or atomic on a GPU-selected descriptor
-    ([#2](https://github.com/wololo-wololo/VIcky-Blue/issues/2)). The shaders that were skipped
+    ([#2](https://github.com/wololo-wololo/VIcky-Blue/issues/2)).
+  - Raw indexed stores and 32-bit atomic add/or on GPU-selected descriptors with a bounded key,
+    and descriptors whose base is picked by a scalar branch on a value read through the user-data
+    pointer, now track. A boot to the intro no longer reports any resource tracking failure; what
+    is left are the specialization failures
+    ([#3](https://github.com/wololo-wololo/VIcky-Blue/issues/3)). The shaders that were skipped
     are large (about 363k SPIR-V words on average, 131 of 195 over 400k), so a first boot takes
     much longer to compile them ([#14](https://github.com/wololo-wololo/VIcky-Blue/issues/14)).
 - Two system library functions the title calls are not implemented yet
