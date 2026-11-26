@@ -253,6 +253,8 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 			    (descriptor.Format() == Prospero::BufferFormat::k32UInt ||
 			     descriptor.Format() == Prospero::BufferFormat::k32Float ||
 			     descriptor.Format() == Prospero::BufferFormat::k32SInt ||
+			     descriptor.Format() == Prospero::BufferFormat::k16Float ||
+			     descriptor.Format() == Prospero::BufferFormat::k8UNorm ||
 			     descriptor.Format() == Prospero::BufferFormat::k8SInt ||
 			     descriptor.Format() == Prospero::BufferFormat::k8UInt ||
 			     descriptor.Format() == Prospero::BufferFormat::k16SInt ||
@@ -271,7 +273,8 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 			// The same holds for a two-byte unsigned record, which truncates x to 8 bits.
 			const bool rg16 = resource.max_byte_extent == 4u &&
 			    (descriptor.Format() == Prospero::BufferFormat::k16_16UInt ||
-			     descriptor.Format() == Prospero::BufferFormat::k8_8UInt);
+			     descriptor.Format() == Prospero::BufferFormat::k8_8UInt ||
+			     descriptor.Format() == Prospero::BufferFormat::k32_32UInt);
 			// A one-component format's missing channels default to 0,0,0 or 0,0,1, both identity,
 			// and a two-component format's to 0,1.
 			const auto selects = descriptor.DstSelXYZW();
@@ -283,7 +286,7 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 			const bool tight_enough = descriptor.Stride() == format.byte_size || byte_indexed ||
 			    (scalar && format.byte_size < 4u && descriptor.Stride() > format.byte_size);
 			if ((!scalar && !rgba16 && !rgba32 && !rg16) || !tight_enough || !identity)
-				return SpecializationFail(fmt::format("indirect formatted stores require an identity 8- or 16-bit integer, UInt32, SInt32, Float32, RG8UInt, RG16UInt, RGBA16Float, RGBA16UInt or RGBA32Float "
+				return SpecializationFail(fmt::format("indirect formatted stores require an identity 8- or 16-bit integer, UNorm8, Float16, UInt32, SInt32, Float32, RG8UInt, RG16UInt, RG32UInt, RGBA16Float, RGBA16UInt or RGBA32Float "
 				    "records: descriptor={:08x},{:08x},{:08x},{:08x} stride={} format={} max_extent={}",
 				    value.dwords[0], value.dwords[1], value.dwords[2], value.dwords[3],
 				    descriptor.Stride(), static_cast<uint32_t>(descriptor.Format()), resource.max_byte_extent));

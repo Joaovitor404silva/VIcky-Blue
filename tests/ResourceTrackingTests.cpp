@@ -6419,8 +6419,8 @@ void TestBoundedFormattedBufferStore() {
             snapshot.buffers[0].dwords[0] == memory.words[32],
         "destination address refresh was frozen or caused needless specialization");
   for (const auto [word, replacement] : std::array<std::pair<uint32_t, uint32_t>, 9>{
-           // Float32 is proved by GpuSelectedFormattedFloat32Store; Float16 is not.
-           {{35u, static_cast<uint32_t>(Prospero::BufferFormat::k16Float) << 12u | 4u},
+           // Float32 and Float16 are proved by GPU-selected store cases; SNorm16 is not.
+           {{35u, static_cast<uint32_t>(Prospero::BufferFormat::k16SNorm) << 12u | 4u},
             {35u, static_cast<uint32_t>(Prospero::BufferFormat::k16UNorm) << 12u | 4u},
             {35u, memory.words[35] & ~7u}, {35u, memory.words[35] | (4u << 3u)},
             {32u, memory.words[32] + 1u},
@@ -6545,6 +6545,27 @@ void TestBoundedFormattedBufferStore() {
     Check(!materialize(), "a one-float store candidate accepted a stride it does not address");
     set_f32(4u, Libs::Graphics::DstSel(4, 4, 0, 1));
     Check(!materialize(), "a one-float store candidate accepted non-identity selects");
+    // Half and UNorm8 records convert a one-component store; a two-dword unsigned record keeps x
+    // and zero-fills y.
+    const auto set_format = [&](Prospero::BufferFormat format, uint32_t stride, uint32_t selects) {
+      set_byte_bounds(stride, 0u, format);
+      for (uint32_t key = 0; key < 8u; ++key) memory.words[32u + key * 4u + 3u] =
+          (static_cast<uint32_t>(format) << 12u) | selects;
+    };
+    for (const auto [format, stride, selects] : std::array<std::tuple<Prospero::BufferFormat, uint32_t, uint32_t>, 3>{{
+             {Prospero::BufferFormat::k16Float, 2u, Libs::Graphics::DstSel(4, 0, 0, 1)},
+             {Prospero::BufferFormat::k8UNorm, 1u, Libs::Graphics::DstSel(4, 0, 0, 1)},
+             {Prospero::BufferFormat::k32_32UInt, 8u, Libs::Graphics::DstSel(4, 5, 0, 1)}}}) {
+      set_format(format, stride, selects);
+      Check(materialize() && snapshot.buffers.size() == 8u,
+            "a store to a tight Float16, UNorm8 or two-dword unsigned record was refused");
+      if (stride == 8u) {
+        set_format(format, 16u, selects);
+        Check(!materialize(), "a two-dword store candidate accepted a stride it does not address");
+      }
+      set_format(format, stride, Libs::Graphics::DstSel(4, 4, 0, 1));
+      Check(!materialize(), "a Float16, UNorm8 or two-dword store candidate accepted non-identity selects");
+    }
     // A dword store to a signed 32-bit record also keeps its bits.
     set_byte_bounds(4u, 0u, Prospero::BufferFormat::k32SInt);
     for (uint32_t key = 0; key < 8u; ++key) memory.words[32u + key * 4u + 3u] =
@@ -7435,7 +7456,8 @@ void TestGpuSelectedFormattedRecordStore() {
   memory.words[first + 1u] = 1u << 16u;
   for (const auto [word, value] : std::array<std::pair<uint32_t, uint32_t>, 4>{{
       {first + 1u, (1u << 16u) | (1u << 31u)},
-      {first + 3u, (uint32_t(Prospero::BufferFormat::k8UNorm) << 12u) | 4u},
+      // UNorm8 is proved by GpuSelectedFormattedUNorm8Store; SNorm8 is not.
+      {first + 3u, (uint32_t(Prospero::BufferFormat::k8SNorm) << 12u) | 4u},
       {first + 3u, memory.words[first + 3u] | (1u << 28u)},
       {first + 3u, memory.words[first + 3u] | (4u << 3u)}}}) {
     const auto saved = memory.words[word];
