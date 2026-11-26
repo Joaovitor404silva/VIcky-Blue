@@ -228,8 +228,11 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 		value.dwords.fill(0u);
 		return true;
 	}
+	// A stride-1 descriptor with byte bounds is indexed by byte, which is what the index check
+	// emitted for candidates computes, so it needs no record geometry of its own.
+	const bool byte_indexed = indexed && descriptor.Stride() == 1u && descriptor.OutOfBounds() == 3u;
 	if (descriptor.SwizzleEnabled() || descriptor.AddTid() ||
-	    descriptor.OutOfBounds() != (indexed ? 0u : 3u)) {
+	    (descriptor.OutOfBounds() != (indexed ? 0u : 3u) && !byte_indexed)) {
 		return SpecializationFail(fmt::format(
 		    "indirect buffers require exact linear index or byte bounds: "
 		    "descriptor={:08x},{:08x},{:08x},{:08x} swizzle={} add_tid={} oob={} "
@@ -248,9 +251,12 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 			     descriptor.Format() == Prospero::BufferFormat::k8SInt);
 			const bool rgba16 = resource.max_byte_extent == 16u &&
 			    descriptor.Format() == Prospero::BufferFormat::k16_16_16_16Float;
-			if ((!scalar && !rgba16) || descriptor.Stride() != format.byte_size ||
+			if ((!scalar && !rgba16) || (descriptor.Stride() != format.byte_size && !byte_indexed) ||
 			    descriptor.DstSelXYZW() != (rgba16 ? DstSel(4, 5, 6, 7) : DstSel(4, 0, 0, 0)))
-				return SpecializationFail("indirect formatted stores require tight identity SInt8, UInt32 or RGBA16Float records");
+				return SpecializationFail(fmt::format("indirect formatted stores require tight identity SInt8, UInt32 or RGBA16Float "
+				    "records: descriptor={:08x},{:08x},{:08x},{:08x} stride={} format={} max_extent={}",
+				    value.dwords[0], value.dwords[1], value.dwords[2], value.dwords[3],
+				    descriptor.Stride(), static_cast<uint32_t>(descriptor.Format()), resource.max_byte_extent));
 		}
 		if (formatted_read &&
 		    (descriptor.Base48() == 0u || descriptor.Stride() == 0u || descriptor.NumRecords() == 0u)) {
@@ -260,8 +266,8 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 			return true;
 		}
 		const auto alignment = std::min(4u, format.byte_size);
-		if (descriptor.Stride() < format.byte_size ||
-		    (descriptor.Stride() & (alignment - 1u)) != 0u ||
+		if ((!byte_indexed && (descriptor.Stride() < format.byte_size ||
+		                       (descriptor.Stride() & (alignment - 1u)) != 0u)) ||
 		    (descriptor.Base48() & (alignment - 1u)) != 0u)
 			return SpecializationFail("indirect formatted buffers require aligned full-format records");
 	} else if ((!indexed && descriptor.Stride() != 1u) ||

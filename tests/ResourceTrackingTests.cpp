@@ -6430,6 +6430,35 @@ void TestBoundedFormattedBufferStore() {
     Check(!materialize(), "formatted finite store accepted an unproved format or bounds mode");
     memory.words[word] = saved;
   }
+  // A stride-1 descriptor with byte bounds addresses bytes by its index, which is the index
+  // check the candidate path already emits. Any other stride or bounds mode stays refused.
+  {
+    memory.words[72] = 8u;
+    const auto set_byte_bounds = [&](uint32_t stride, uint32_t oob) {
+      for (uint32_t key = 0; key < 8u; ++key) {
+        const auto word = 32u + key * 4u;
+        memory.words[word + 1u] = stride << 16u;
+        memory.words[word + 2u] = lengths[key] * 4u;
+        memory.words[word + 3u] = static_cast<uint32_t>(Prospero::BufferFormat::k32UInt) << 12u | 4u |
+                                  oob << 28u;
+      }
+    };
+    set_byte_bounds(1u, 3u);
+    Check(materialize() && snapshot.buffers.size() == 8u &&
+              snapshot.buffers[0].dwords[2] == lengths[0] * 4u,
+          "byte-addressed formatted store candidates were refused");
+    for (const auto [stride, oob] : std::array<std::pair<uint32_t, uint32_t>, 3>{
+             {{1u, 0u}, {2u, 3u}, {4u, 3u}}}) {
+      set_byte_bounds(stride, oob);
+      Check(!materialize(), "formatted store accepted a stride or bounds mode it does not address");
+    }
+    for (uint32_t key = 0; key < 8u; ++key) {
+      const auto word = 32u + key * 4u;
+      memory.words[word + 1u] = 4u << 16u;
+      memory.words[word + 2u] = lengths[key];
+      memory.words[word + 3u] = static_cast<uint32_t>(Prospero::BufferFormat::k32UInt) << 12u | 4u;
+    }
+  }
   for (const uint32_t count : {MaxIndirectDescriptorProbes + 1u, 0x80000000u, UINT32_MAX}) {
     memory.words[72] = count;
     memory.watched_reads = 0;
