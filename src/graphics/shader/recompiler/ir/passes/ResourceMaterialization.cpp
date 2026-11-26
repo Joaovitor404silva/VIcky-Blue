@@ -248,12 +248,13 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 		if (!formatted_read) {
 			const bool scalar = resource.max_byte_extent == 4u &&
 			    (descriptor.Format() == Prospero::BufferFormat::k32UInt ||
-			     descriptor.Format() == Prospero::BufferFormat::k8SInt);
+			     descriptor.Format() == Prospero::BufferFormat::k8SInt ||
+			     descriptor.Format() == Prospero::BufferFormat::k8UInt);
 			const bool rgba16 = resource.max_byte_extent == 16u &&
 			    descriptor.Format() == Prospero::BufferFormat::k16_16_16_16Float;
 			if ((!scalar && !rgba16) || (descriptor.Stride() != format.byte_size && !byte_indexed) ||
 			    descriptor.DstSelXYZW() != (rgba16 ? DstSel(4, 5, 6, 7) : DstSel(4, 0, 0, 0)))
-				return SpecializationFail(fmt::format("indirect formatted stores require tight identity SInt8, UInt32 or RGBA16Float "
+				return SpecializationFail(fmt::format("indirect formatted stores require tight identity SInt8, UInt8, UInt32 or RGBA16Float "
 				    "records: descriptor={:08x},{:08x},{:08x},{:08x} stride={} format={} max_extent={}",
 				    value.dwords[0], value.dwords[1], value.dwords[2], value.dwords[3],
 				    descriptor.Stride(), static_cast<uint32_t>(descriptor.Format()), resource.max_byte_extent));

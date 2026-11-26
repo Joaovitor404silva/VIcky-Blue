@@ -6434,13 +6434,13 @@ void TestBoundedFormattedBufferStore() {
   // check the candidate path already emits. Any other stride or bounds mode stays refused.
   {
     memory.words[72] = 8u;
-    const auto set_byte_bounds = [&](uint32_t stride, uint32_t oob) {
+    const auto set_byte_bounds = [&](uint32_t stride, uint32_t oob,
+                                     Prospero::BufferFormat format = Prospero::BufferFormat::k32UInt) {
       for (uint32_t key = 0; key < 8u; ++key) {
         const auto word = 32u + key * 4u;
         memory.words[word + 1u] = stride << 16u;
         memory.words[word + 2u] = lengths[key] * 4u;
-        memory.words[word + 3u] = static_cast<uint32_t>(Prospero::BufferFormat::k32UInt) << 12u | 4u |
-                                  oob << 28u;
+        memory.words[word + 3u] = static_cast<uint32_t>(format) << 12u | 4u | oob << 28u;
       }
     };
     set_byte_bounds(1u, 3u);
@@ -6452,6 +6452,14 @@ void TestBoundedFormattedBufferStore() {
       set_byte_bounds(stride, oob);
       Check(!materialize(), "formatted store accepted a stride or bounds mode it does not address");
     }
+    // Unsigned bytes are stored like signed bytes, with either bounds mode at a stride of one.
+    for (const uint32_t oob : {0u, 3u}) {
+      set_byte_bounds(1u, oob, Prospero::BufferFormat::k8UInt);
+      Check(materialize() && snapshot.buffers.size() == 8u,
+            "UInt8 formatted store candidates were refused");
+    }
+    set_byte_bounds(2u, 3u, Prospero::BufferFormat::k8UInt);
+    Check(!materialize(), "UInt8 formatted store accepted a stride it does not address");
     for (uint32_t key = 0; key < 8u; ++key) {
       const auto word = 32u + key * 4u;
       memory.words[word + 1u] = 4u << 16u;
@@ -7291,7 +7299,7 @@ void TestGpuSelectedFormattedRecordStore() {
         "signed byte destination refresh required alignment or needless specialization");
   for (const auto [word, value] : std::array<std::pair<uint32_t, uint32_t>, 5>{{
       {first + 1u, 2u << 16u}, {first + 1u, (1u << 16u) | (1u << 31u)},
-      {first + 3u, (uint32_t(Prospero::BufferFormat::k8UInt) << 12u) | 4u},
+      {first + 3u, (uint32_t(Prospero::BufferFormat::k8UNorm) << 12u) | 4u},
       {first + 3u, memory.words[first + 3u] | (1u << 28u)},
       {first + 3u, memory.words[first + 3u] | (4u << 3u)}}}) {
     const auto saved = memory.words[word];
