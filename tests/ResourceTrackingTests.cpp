@@ -6420,7 +6420,7 @@ void TestBoundedFormattedBufferStore() {
         "destination address refresh was frozen or caused needless specialization");
   for (const auto [word, replacement] : std::array<std::pair<uint32_t, uint32_t>, 9>{
            {{35u, static_cast<uint32_t>(Prospero::BufferFormat::k32Float) << 12u | 4u},
-            {35u, static_cast<uint32_t>(Prospero::BufferFormat::k16UInt) << 12u | 4u},
+            {35u, static_cast<uint32_t>(Prospero::BufferFormat::k16UNorm) << 12u | 4u},
             {35u, memory.words[35] & ~7u}, {35u, memory.words[35] | (4u << 3u)},
             {32u, memory.words[32] + 1u},
             {33u, 8u << 16u}, {33u, (4u << 16u) | (1u << 31u)},
@@ -6464,6 +6464,58 @@ void TestBoundedFormattedBufferStore() {
     }
     set_byte_bounds(2u, 3u, Prospero::BufferFormat::k8UInt);
     Check(!materialize(), "UInt8 formatted store accepted a stride it does not address");
+    // 16-bit integer stores take one dword register and write two bytes, so they are tight at a
+    // stride of two with record bounds, and byte bounds stay reserved for one-byte formats.
+    for (const auto format : {Prospero::BufferFormat::k16UInt, Prospero::BufferFormat::k16SInt}) {
+      set_byte_bounds(2u, 0u, format);
+      Check(materialize() && snapshot.buffers.size() == 8u,
+            "16-bit integer formatted store candidates were refused");
+      for (const auto [stride, oob] : std::array<std::pair<uint32_t, uint32_t>, 2>{
+               {{1u, 0u}, {2u, 3u}}}) {
+        set_byte_bounds(stride, oob, format);
+        Check(!materialize(), "16-bit integer formatted store accepted a stride or bounds it does not address");
+      }
+    }
+    // A byte or halfword may sit in a wider record, as long as it stays aligned in it; words keep
+    // to tight records.
+    for (const auto [format, stride] : std::array<std::pair<Prospero::BufferFormat, uint32_t>, 3>{
+             {{Prospero::BufferFormat::k8UInt, 180u}, {Prospero::BufferFormat::k8SInt, 2048u},
+              {Prospero::BufferFormat::k16UInt, 12u}}}) {
+      set_byte_bounds(stride, 0u, format);
+      Check(materialize() && snapshot.buffers.size() == 8u,
+            "a store candidate in records wider than its format was refused");
+    }
+    set_byte_bounds(6u, 0u, Prospero::BufferFormat::k16SInt);
+    Check(materialize(), "a halfword store candidate in an aligned record was refused");
+    set_byte_bounds(7u, 0u, Prospero::BufferFormat::k16UInt);
+    Check(!materialize(), "a halfword store candidate accepted a stride that misaligns it");
+    set_byte_bounds(8u, 0u, Prospero::BufferFormat::k32UInt);
+    Check(!materialize(), "a 32-bit store candidate accepted a stride it does not address");
+    // A dword store to a four-component float record zero-fills the other channels; it needs the
+    // identity RGBA selects and a tight record.
+    const auto set_rgba32 = [&](uint32_t stride, uint32_t selects) {
+      set_byte_bounds(stride, 0u, Prospero::BufferFormat::k32_32_32_32Float);
+      for (uint32_t key = 0; key < 8u; ++key) memory.words[32u + key * 4u + 3u] =
+          (static_cast<uint32_t>(Prospero::BufferFormat::k32_32_32_32Float) << 12u) | selects;
+    };
+    set_rgba32(16u, Libs::Graphics::DstSel(4, 5, 6, 7));
+    Check(materialize() && snapshot.buffers.size() == 8u,
+          "a dword store to a tight RGBA32 float record was refused");
+    set_rgba32(32u, Libs::Graphics::DstSel(4, 5, 6, 7));
+    Check(!materialize(), "an RGBA32 float store candidate accepted a stride it does not address");
+    set_rgba32(16u, Libs::Graphics::DstSel(4, 0, 0, 0));
+    Check(!materialize(), "an RGBA32 float store candidate accepted non-identity selects");
+    // A one-component format's missing channels default to 0,0,0 or 0,0,1, both identity; any
+    // other select pattern is still refused.
+    set_byte_bounds(1u, 0u, Prospero::BufferFormat::k8UInt);
+    for (uint32_t key = 0; key < 8u; ++key) memory.words[32u + key * 4u + 3u] |= 1u << 9u;
+    Check(materialize() && snapshot.buffers.size() == 8u,
+          "a store candidate with the default alpha select was refused");
+    for (const uint32_t extra : {2u << 9u, 4u << 9u, 1u << 6u, 4u << 3u}) {
+      set_byte_bounds(1u, 0u, Prospero::BufferFormat::k8UInt);
+      for (uint32_t key = 0; key < 8u; ++key) memory.words[32u + key * 4u + 3u] |= extra;
+      Check(!materialize(), "a store candidate accepted destination selects that are not identity");
+    }
     for (uint32_t key = 0; key < 8u; ++key) {
       const auto word = 32u + key * 4u;
       memory.words[word + 1u] = 4u << 16u;
@@ -7301,8 +7353,13 @@ void TestGpuSelectedFormattedRecordStore() {
   memory.words[first] += 1u;
   Check(materialize() && specialization == original,
         "signed byte destination refresh required alignment or needless specialization");
-  for (const auto [word, value] : std::array<std::pair<uint32_t, uint32_t>, 5>{{
-      {first + 1u, 2u << 16u}, {first + 1u, (1u << 16u) | (1u << 31u)},
+  // A byte in a wider record is addressed by its stride, like the halfword and byte cases the
+  // GPU selected store tests run.
+  memory.words[first + 1u] = 2u << 16u;
+  Check(materialize(), "signed byte candidate refused a record wider than the byte");
+  memory.words[first + 1u] = 1u << 16u;
+  for (const auto [word, value] : std::array<std::pair<uint32_t, uint32_t>, 4>{{
+      {first + 1u, (1u << 16u) | (1u << 31u)},
       {first + 3u, (uint32_t(Prospero::BufferFormat::k8UNorm) << 12u) | 4u},
       {first + 3u, memory.words[first + 3u] | (1u << 28u)},
       {first + 3u, memory.words[first + 3u] | (4u << 3u)}}}) {
