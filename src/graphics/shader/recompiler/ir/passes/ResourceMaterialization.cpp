@@ -257,8 +257,11 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 			     descriptor.Format() == Prospero::BufferFormat::k16UInt);
 			// A four-component store fills the record; a one-component store converts x and
 			// zero-fills the rest.
-			const bool rgba16 = (resource.max_byte_extent == 16u || resource.max_byte_extent == 4u) &&
-			    descriptor.Format() == Prospero::BufferFormat::k16_16_16_16Float;
+			// The unsigned variant is proved for one-component stores, which truncate x.
+			const bool rgba16 = ((resource.max_byte_extent == 16u || resource.max_byte_extent == 4u) &&
+			                     descriptor.Format() == Prospero::BufferFormat::k16_16_16_16Float) ||
+			                    (resource.max_byte_extent == 4u &&
+			                     descriptor.Format() == Prospero::BufferFormat::k16_16_16_16UInt);
 			// A dword store to a four-component float record zero-fills the other channels.
 			const bool rgba32 = resource.max_byte_extent == 4u &&
 			    descriptor.Format() == Prospero::BufferFormat::k32_32_32_32Float;
@@ -276,7 +279,7 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 			const bool tight_enough = descriptor.Stride() == format.byte_size || byte_indexed ||
 			    (scalar && format.byte_size < 4u && descriptor.Stride() > format.byte_size);
 			if ((!scalar && !rgba16 && !rgba32 && !rg16) || !tight_enough || !identity)
-				return SpecializationFail(fmt::format("indirect formatted stores require an identity 8- or 16-bit integer, UInt32, RG16UInt, RGBA16Float or RGBA32Float "
+				return SpecializationFail(fmt::format("indirect formatted stores require an identity 8- or 16-bit integer, UInt32, RG16UInt, RGBA16Float, RGBA16UInt or RGBA32Float "
 				    "records: descriptor={:08x},{:08x},{:08x},{:08x} stride={} format={} max_extent={}",
 				    value.dwords[0], value.dwords[1], value.dwords[2], value.dwords[3],
 				    descriptor.Stride(), static_cast<uint32_t>(descriptor.Format()), resource.max_byte_extent));
