@@ -7558,6 +7558,37 @@ void TestGpuKeyedRawIndexedStore() {
     CheckFatal([&] { make(true, false, access); }, "not a valid runtime value",
                "indexed raw access accepted an unbounded GPU key");
   }
+  // The table is scanned whole, so a long table of few distinct descriptors must still
+  // specialize: only the distinct candidates are bound, not the rows.
+  auto fixture = make(true, true);
+  const auto plan = ExtractResourcePlan(fixture->program);
+  for (const uint32_t rows : {1000u, 196608u, MaxIndirectTableRows, MaxIndirectTableRows + 1u}) {
+    constexpr uint32_t table = 0x2000u;
+    constexpr uint32_t distinct = 10u;
+    LinearTestMemory memory;
+    memory.words.resize((table - memory.base) / 4u + rows * 4u, 0u);
+    const auto first = (table - memory.base) / 4u;
+    for (uint32_t row = 0; row < rows; ++row) {
+      const auto at = first + row * 4u;
+      memory.words[at] = 0x100000u + (row % distinct) * 0x1000u;
+      memory.words[at + 1u] = 4u << 16u;
+      memory.words[at + 2u] = 0x40u;
+      memory.words[at + 3u] = 0x5204u;
+    }
+    std::array<uint32_t, 8> user_data{table, 16u << 16u, rows, 0x5204u};
+    const SrtRuntime runtime{.user_data = user_data, .userdata = &memory,
+                             .read_specialization_memory = ReadLinearTestMemory};
+    FakeGuestMemory fake(ReadLinearTestMemory, &memory);
+    ResourceSnapshot snapshot;
+    ResourceSpecialization specialization;
+    const bool accepted = MaterializeResources(plan, runtime, snapshot, specialization);
+    if (rows <= MaxIndirectTableRows) {
+      Check(accepted && snapshot.buffers.size() >= distinct,
+            "long keyed descriptor table did not specialize to its distinct candidates");
+    } else {
+      Check(!accepted, "keyed descriptor table past the row limit was accepted");
+    }
+  }
 }
 
 void TestBranchSelectedDescriptorWord() {
