@@ -15,6 +15,7 @@
 #include <functional>
 #include <numeric>
 #include <unordered_set>
+#include <unordered_map>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
 namespace {
@@ -614,16 +615,26 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 	const auto children_begin = descriptors.size();
 	const auto root_resource = specializations[resource_index];
 	const auto intern_candidate = [&](const DescriptorValue& candidate) {
+	// Tables reach tens of thousands of distinct descriptors and are materialized per dispatch,
+	// so candidates are interned through a hash map instead of a linear search.
+	struct CandidateHash {
+		size_t operator()(const DescriptorValue& value) const {
+			uint64_t hash = 0xcbf29ce484222325ull ^ value.dword_count;
+			for (const auto dword: value.dwords) hash = (hash ^ dword) * 0x100000001b3ull;
+			return static_cast<size_t>(hash ^ (hash >> 32u));
+		}
+	};
+	std::unordered_map<DescriptorValue, uint32_t, CandidateHash> interned;
 		if (candidate == descriptors[resource_index]) return 0u;
-		const auto found = std::find(descriptors.begin() + children_begin, descriptors.end(), candidate);
-		const auto ordinal = static_cast<uint32_t>(found - descriptors.begin() - children_begin + 1u);
-		if (found == descriptors.end()) {
+		const auto ordinal = static_cast<uint32_t>(descriptors.size() - children_begin + 1u);
+		const auto [found, inserted] = interned.try_emplace(candidate, ordinal);
+		if (inserted) {
 			descriptors.push_back(candidate);
 			auto child = root_resource;
 			child.indirect_root = resource_index;
 			specializations.push_back(child);
 		}
-		return ordinal;
+		return found->second;
 	};
 	uint64_t table_base = 0;
 	uint64_t table_size = UINT64_MAX; // Scalar addresses have no buffer descriptor bounds.
@@ -1745,9 +1756,11 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 					        program, base.source, i, 4u, 4u, observed, snapshot,
 					        snapshot.buffers, specialization.buffers,
 					        [&](DescriptorValue& value) {
-						        return NormalizeIndirectBuffer(
-						            value, source->indirect_descriptor->indexed, base);
-					        }))
+						        if (NormalizeIndirectBuffer(value, source->indirect_descriptor->indexed, base))
+							        return true;
+						        dbg_row_failed = true;
+						        return dbg_all_rows;
+					        }) || dbg_row_failed)
 						return resource_failed("buffer", i, base.source, snapshot.buffers.size());
 				}
 			} else if (!evaluate(base.source, snapshot.buffers[i])) {
