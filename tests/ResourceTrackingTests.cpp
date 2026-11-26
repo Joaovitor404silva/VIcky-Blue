@@ -6545,6 +6545,15 @@ void TestBoundedFormattedBufferStore() {
     Check(!materialize(), "a one-float store candidate accepted a stride it does not address");
     set_f32(4u, Libs::Graphics::DstSel(4, 4, 0, 1));
     Check(!materialize(), "a one-float store candidate accepted non-identity selects");
+    // A dword store to a signed 32-bit record also keeps its bits.
+    set_byte_bounds(4u, 0u, Prospero::BufferFormat::k32SInt);
+    for (uint32_t key = 0; key < 8u; ++key) memory.words[32u + key * 4u + 3u] =
+        (static_cast<uint32_t>(Prospero::BufferFormat::k32SInt) << 12u) | Libs::Graphics::DstSel(4, 0, 0, 1);
+    Check(materialize() && snapshot.buffers.size() == 8u,
+          "a store to a tight signed 32-bit record was refused");
+    for (uint32_t key = 0; key < 8u; ++key) memory.words[32u + key * 4u + 3u] =
+        (static_cast<uint32_t>(Prospero::BufferFormat::k32SInt) << 12u) | Libs::Graphics::DstSel(4, 4, 0, 1);
+    Check(!materialize(), "a signed 32-bit store candidate accepted non-identity selects");
     // A store to a two-byte unsigned record truncates x to 8 bits and zero-fills y.
     const auto set_rg8 = [&](uint32_t stride, uint32_t selects) {
       set_byte_bounds(stride, 0u, Prospero::BufferFormat::k8_8UInt);
