@@ -320,7 +320,51 @@ auto EmitBufferAccess(ValueEmitContext& ctx, const IR::Inst& inst, IR::MemoryInf
 	const auto representative = SharedIndirectBufferResource(state, root_resource);
 	const auto shared = representative != UINT32_MAX;
 	const auto empty_root = shared && buffer.packed_stride == 0u;
+	const auto groups = shared ? IndirectBufferGroups {} : GroupIndirectBufferCandidates(state, root_resource);
+	const auto grouped = !groups.representatives.empty();
 	const auto selected_access = [&]() {
+		if (grouped) {
+			// One case per layout group instead of per candidate: a table of a hundred candidates
+			// in a few formats otherwise copies every access a hundred times. The group comes
+			// from a membership bit mask per group, indexed by the selected ordinal.
+			const auto count = static_cast<uint32_t>(groups.group_of.size());
+			const auto mask_words = (count + 31u) / 32u;
+			const auto word_index = Binary(state, spv::OpShiftRightLogical, TypeU32(state), selected,
+			                               ConstantU32(state, 5u));
+			const auto bit = Binary(state, spv::OpBitwiseAnd, TypeU32(state), selected, ConstantU32(state, 31u));
+			auto group = ConstantU32(state, 0u);
+			for (uint32_t g = 1; g < groups.representatives.size(); ++g) {
+				auto word = 0u;
+				for (uint32_t w = 0; w < mask_words; ++w) {
+					uint32_t mask = 0;
+					for (uint32_t ordinal = w * 32u; ordinal < std::min(count, w * 32u + 32u); ++ordinal)
+						if (groups.group_of[ordinal] == g) mask |= 1u << (ordinal - w * 32u);
+					word = w == 0u ? ConstantU32(state, mask)
+					    : Select(state, TypeU32(state),
+					          Binary(state, spv::OpIEqual, TypeBool(state), word_index, ConstantU32(state, w)),
+					          ConstantU32(state, mask), word);
+				}
+				const auto member = Binary(state, spv::OpINotEqual, TypeBool(state),
+				    Binary(state, spv::OpBitwiseAnd, TypeU32(state),
+				        Binary(state, spv::OpShiftRightLogical, TypeU32(state), word, bit), ConstantU32(state, 1u)),
+				    ConstantU32(state, 0u));
+				group = Select(state, TypeU32(state), member, ConstantU32(state, g), group);
+			}
+			auto slot = EmitAddU32(state, selected, ConstantU32(state, groups.child_slot - 1u));
+			if (groups.child_slot != groups.root_slot + 1u) {
+				slot = Select(state, TypeU32(state),
+				    Binary(state, spv::OpIEqual, TypeBool(state), selected, ConstantU32(state, 0u)),
+				    ConstantU32(state, groups.root_slot), slot);
+			}
+			return EmitIndexSwitch(state, group, static_cast<uint32_t>(groups.representatives.size()),
+			                       has_result ? TypeU32Composite(state, components) : 0u, [&](uint32_t g) {
+				const auto representative = groups.representatives[g];
+				const auto& candidate = state.program.info.buffers[representative];
+				if (candidate.packed_stride == 0u) return access(representative);
+				mem.resource = representative;
+				return emit(mem, PrepareMemoryResourceAccess(state, mem, slot));
+			});
+		}
 		if (shared) {
 			const auto root_slot = buffer.descriptor_index;
 			const auto child_slot = state.program.info.buffers[buffer.indirect_resources[1]].descriptor_index;
@@ -338,7 +382,8 @@ auto EmitBufferAccess(ValueEmitContext& ctx, const IR::Inst& inst, IR::MemoryInf
 		                       [&](uint32_t item) { return access(buffer.indirect_resources[item]); });
 	};
 	if constexpr (!has_result) {
-		if (!shared) return selected_access();
+		// The candidate switch skips out-of-range keys itself; the group and shared paths do not.
+		if (!shared && !grouped) return selected_access();
 	}
 	auto valid = Binary(state, spv::OpULessThan, TypeBool(state), selected,
 	                          ConstantU32(state, buffer.indirect_resources.size()));

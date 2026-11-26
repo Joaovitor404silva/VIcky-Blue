@@ -154,6 +154,38 @@ uint32_t SharedIndirectBufferResource(const EmitterState& state, uint32_t resour
 	return representative;
 }
 
+IndirectBufferGroups GroupIndirectBufferCandidates(const EmitterState& state, uint32_t resource) {
+	const auto& buffers = state.program.info.buffers;
+	const auto& root = buffers[resource];
+	if (root.indirect_root != resource || root.indirect_resources.size() < 2u) return {};
+	// An empty candidate carries no descriptor: it is emitted without one, from its own layout.
+	const auto empty = [&](const IR::BufferResource& buffer) {
+		return buffer.packed_stride == 0u && buffer.source < state.program.descriptor_sources.size() &&
+		       state.program.descriptor_sources[buffer.source].indirect_descriptor.has_value();
+	};
+	IndirectBufferGroups groups;
+	groups.root_slot = buffers[root.indirect_resources[0]].descriptor_index;
+	groups.child_slot = buffers[root.indirect_resources[1]].descriptor_index;
+	for (uint32_t ordinal = 0; ordinal < root.indirect_resources.size(); ++ordinal) {
+		const auto& candidate = buffers[root.indirect_resources[ordinal]];
+		if (candidate.descriptor_index == UINT32_MAX ||
+		    (ordinal != 0u && candidate.descriptor_index != groups.child_slot + ordinal - 1u)) return {};
+		const auto same = [&](uint32_t representative) {
+			const auto& other = buffers[representative];
+			return empty(other) == empty(candidate) && other.packed_stride == candidate.packed_stride &&
+			       other.descriptor_format == candidate.descriptor_format &&
+			       other.descriptor_swizzle == candidate.descriptor_swizzle;
+		};
+		const auto found = std::find_if(groups.representatives.begin(), groups.representatives.end(), same);
+		groups.group_of.push_back(static_cast<uint32_t>(found - groups.representatives.begin()));
+		if (found == groups.representatives.end())
+			groups.representatives.push_back(root.indirect_resources[ordinal]);
+	}
+	// A group per candidate gains nothing over the candidate switch.
+	if (groups.representatives.size() == groups.group_of.size()) return {};
+	return groups;
+}
+
 void EmitMemoryBindings(EmitterState& state) {
 	const auto count = state.program.bindings.descriptor_counts[static_cast<size_t>(IR::DescriptorBindingKind::Buffers)];
 	state.memory_byte_offsets.resize(count);

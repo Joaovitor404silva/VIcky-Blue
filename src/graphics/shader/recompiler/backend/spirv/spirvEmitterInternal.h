@@ -406,6 +406,18 @@ Prospero::BufferFormat StorageBufferFormat(const EmitterState& state, const IR::
 
 uint32_t SharedIndirectBufferResource(const EmitterState& state, uint32_t resource);
 
+// Candidates of a GPU-selected buffer that differ in layout, grouped so that each access is
+// emitted once per group: the selected ordinal picks its group at run time, and its descriptor
+// slot follows from the ordinal because the children's slots are consecutive.
+struct IndirectBufferGroups {
+	std::vector<uint32_t> representatives; // one candidate resource per group
+	std::vector<uint32_t> group_of;        // group of each candidate ordinal
+	uint32_t              root_slot  = 0;  // descriptor slot of ordinal 0
+	uint32_t              child_slot = 0;  // descriptor slot of ordinal 1
+};
+// Empty when the candidates cannot share a group switch.
+IndirectBufferGroups GroupIndirectBufferCandidates(const EmitterState& state, uint32_t resource);
+
 void EmitMemoryBindings(EmitterState& state);
 
 uint32_t LdsDwordCount(const EmitterState& state);

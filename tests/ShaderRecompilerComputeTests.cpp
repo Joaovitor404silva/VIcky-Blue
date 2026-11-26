@@ -45730,7 +45730,7 @@ void CheckGpuSelectedFormattedRecordStore(VulkanHarness &vulkan) {
   const u32 slot = (4096u + alignment - 1u) / alignment * alignment;
   // Modes: signed bytes, RGBA16 float records, unsigned halfwords, and unsigned halfwords in
   // records wider than the format.
-  for (const u32 mode : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 11u, 12u, 13u, 14u})
+  for (const u32 mode : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 11u, 12u, 13u, 14u, 15u})
   for (const u32 wave : {32u, 64u}) {
     // Mode 8 stores x to an RGBA16 unsigned record, which truncates x and zero-fills the rest.
     const bool rgba16u = mode == 8u;
@@ -45741,7 +45741,10 @@ void CheckGpuSelectedFormattedRecordStore(VulkanHarness &vulkan) {
     // Mode 10 stores a dword to a one-float record, which keeps its bits.
     // Mode 11 does the same to a signed 32-bit record, with negative values.
     const bool i32 = mode == 11u;
-    const bool f32 = mode == 10u || i32;
+    // Mode 15 mixes Float32 and UInt32 rows: the candidates differ only in format, so each
+    // access must be emitted once per format group, not once per candidate.
+    const bool mixed = mode == 15u;
+    const bool f32 = mode == 10u || i32 || mixed;
     // Modes 12 and 13 convert a dword store to a half or UNorm8 record; mode 14 stores x to a
     // two-dword unsigned record, which zero-fills y.
     const bool r16f = mode == 12u, unorm8 = mode == 13u, rg32 = mode == 14u;
@@ -45764,6 +45767,7 @@ void CheckGpuSelectedFormattedRecordStore(VulkanHarness &vulkan) {
                 : rgba16u ? "GpuSelectedFormattedRgba16UIntXStore"
                 : rg8 ? "GpuSelectedFormattedRg8UIntStore"
                 : i32 ? "GpuSelectedFormattedSInt32Store"
+                : mixed ? "GpuSelectedFormattedMixedStore"
                 : r16f ? "GpuSelectedFormattedFloat16Store"
                 : unorm8 ? "GpuSelectedFormattedUNorm8Store"
                 : rg32 ? "GpuSelectedFormattedRg32UIntStore"
@@ -45784,7 +45788,9 @@ void CheckGpuSelectedFormattedRecordStore(VulkanHarness &vulkan) {
           : r16f ? (u32(Prospero::BufferFormat::k16Float) << 12u) | DstSel(4, 0, 0, 1)
           : unorm8 ? (u32(Prospero::BufferFormat::k8UNorm) << 12u) | DstSel(4, 0, 0, 1)
           : rg32 ? (u32(Prospero::BufferFormat::k32_32UInt) << 12u) | DstSel(4, 5, 0, 1)
-          : f32 ? (u32(i32 ? Prospero::BufferFormat::k32SInt : Prospero::BufferFormat::k32Float) << 12u) | DstSel(4, 0, 0, 1)
+          : f32 ? (u32(i32 ? Prospero::BufferFormat::k32SInt
+                       : mixed && (row & 1u) != 0u ? Prospero::BufferFormat::k32UInt
+                       : Prospero::BufferFormat::k32Float) << 12u) | DstSel(4, 0, 0, 1)
                : (u32(half ? Prospero::BufferFormat::k16UInt : Prospero::BufferFormat::k8SInt) << 12u) |
                      DstSel(4, 0, 0, 0)};
       std::copy(descriptor.begin(), descriptor.end(),
@@ -45912,7 +45918,7 @@ void CheckGpuSelectedFormattedRecordStore(VulkanHarness &vulkan) {
         offset += words.size();
       }
       Require(test.name, "one shared store after the null candidate",
-              shared_stores == (wave > vulkan.SubgroupSize() ? 2u : 1u) * (rgba32 || rgba16x || rgba16u ? 4u : rg16 || rg8 || rg32 ? 2u : 1u),
+              shared_stores == (wave > vulkan.SubgroupSize() ? 2u : 1u) * (rgba32 || rgba16x || rgba16u ? 4u : rg16 || rg8 || rg32 || mixed ? 2u : 1u),
               "homogeneous children duplicated the native store per descriptor");
     }
     u32 bda_loads = 0, native_stores = 0;
