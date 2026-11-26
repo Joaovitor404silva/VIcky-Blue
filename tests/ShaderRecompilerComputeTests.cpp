@@ -14080,6 +14080,54 @@ public:
         }
       }
 
+      // A shader that specialized once can meet a table that no longer does, because the guest
+      // rewrote a row. That dispatch is skipped; it must neither abort the title nor condemn
+      // the shader, whose next dispatch with a usable table still runs.
+      {
+        shaders.SetCsShader({.data_addr = reinterpret_cast<uint64_t>(table_shader.data()),
+                             .num_thread_x = 1, .num_thread_y = 1, .num_thread_z = 1,
+                             .wave_size = 64, .user_sgpr = 2, .tgid_x_en = true,
+                             .tgid_y_en = true, .tgid_z_en = true});
+        shaders.SetCsUserSgpr(0, static_cast<u32>(parameters));
+        shaders.SetCsUserSgpr(1, static_cast<u32>(parameters >> 32u));
+        const auto write_rows = [&](Prospero::ImageType second_type) {
+          std::array<u32, 74> table{};
+          for (u32 row = 0; row < 2u; row++) {
+            const auto address = base + 0x90000 + row * 0x10000;
+            const auto type = row == 0u ? Prospero::ImageType::kColor2D : second_type;
+            const ShaderTextureResource sharp{{static_cast<u32>(address >> 8u),
+                (static_cast<u32>(Prospero::BufferFormat::k32UInt) << 20u) | (3u << 30u),
+                1u << 14u,
+                DstSel(4, 5, 6, 7) | (static_cast<u32>(Prospero::TileMode::kLinear) << 20u) |
+                    (static_cast<u32>(type) << 28u),
+                0, 0x00700000u, 0, 0}};
+            std::copy_n(sharp.fields, 8, table.begin() + row * 37);
+          }
+          Require(name, "rewritten table refresh",
+                  context.InvalidateMemory(table_address, sizeof(table)),
+                  "the descriptor table escaped its mapped allocation");
+          LibKernel::Memory::WriteBacking(table_address, table.data(), sizeof(table));
+        };
+        const auto dispatch_program = [&] {
+          ShaderComputeInputInfo input{};
+          input.workgroup_counts[0] = input.workgroup_counts[1] = 1;
+          input.workgroup_counts[2] = 2;
+          return context.GetPipelineCache().GetComputeProgram(shaders.GetCs(), input);
+        };
+        write_rows(Prospero::ImageType::kColor2D);
+        const auto usable = dispatch_program();
+        Require(name, "usable table before rewrite", usable != nullptr,
+                "the fixture table did not specialize");
+        write_rows(Prospero::ImageType::kColor3D);
+        Require(name, "unusable table skips the dispatch", dispatch_program() == nullptr,
+                "a cached shader whose table no longer specializes still ran");
+        write_rows(Prospero::ImageType::kColor2D);
+        const auto restored = dispatch_program();
+        Require(name, "usable table after rewrite",
+                restored != nullptr && usable != nullptr && restored->id == usable->id,
+                "one unusable table permanently skipped the shader");
+      }
+
       // GPU-written dispatch counts bound the stride12 selector prefix; only
       // those keys select the two real descriptor members in each stride192 row.
       constexpr auto record_args = base + 0xd0000;
