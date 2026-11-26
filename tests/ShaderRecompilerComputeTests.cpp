@@ -13477,6 +13477,46 @@ public:
     std::printf("[host]    %-32s ok\n", name);
   }
 
+  // A descriptor the guest left pointing at unmapped memory faults only when the shader touches
+  // it, so binding one must not stop emulation; it binds as a null descriptor. The words match a
+  // table row the target title binds: base 0x500400000198, stride 12288, over 1 GiB of records.
+  void CheckUnmappedBufferDescriptor() {
+    constexpr const char *name = "UnmappedBufferDescriptor";
+    EnsureRuntimeContext();
+    RenderContext context(m_runtime_context);
+    auto &executor = context.GetRenderExecutor();
+    for (const bool written : {false, true}) {
+      for (const u32 records : {0x00100000u, 0xffffffffu}) {
+        ShaderModule module;
+        auto &program = module.info;
+        program.stage = ShaderType::Compute;
+        program.info.buffers.push_back({.packed_stride = 1, .written = written});
+        program.info.buffers[0].descriptor_index = 0;
+        program.bindings.descriptor_counts[0] = 1;
+        program.bindings.descriptor_mask = 1;
+        ShaderRecompiler::IR::ResourceSnapshot snapshot;
+        auto &value = snapshot.buffers.emplace_back();
+        value.dword_count = 4;
+        value.dwords[0] = 0x00000198u;
+        value.dwords[1] = 0x00005004u | (12288u << 16u);
+        value.dwords[2] = records;
+        ShaderStageRuntime runtime{&module, &snapshot};
+        PreparedBindings bindings;
+        executor.PrepareBindings(runtime, bindings);
+        std::array<PreparedBindings *, 1> stages{&bindings};
+        executor.FindBuffers(stages);
+        executor.RebindBuffers(bindings);
+        const auto &view = bindings.buffers[0];
+        Require(name, "null descriptor",
+                view.buffer == nullptr && view.offset == 0 && view.range == vk::WholeSize &&
+                    bindings.shader_data[program.bindings.MemorySizeDword()] == 0,
+                std::string("an unmapped descriptor was not bound as null: written=") +
+                    (written ? "1" : "0") + " records=" + std::to_string(records));
+      }
+    }
+    std::printf("[host]    %-32s ok\n", name);
+  }
+
   void CheckZeroStrideBufferBinding() {
     constexpr const char *name = "ZeroStrideBufferBinding";
     constexpr uintptr_t base = 0x0000000204c00000ull;
@@ -59004,6 +59044,7 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--robust-buffer-only") == 0) {
     VulkanHarness vulkan;
     vulkan.CheckNullStorageBufferDescriptor();
+    vulkan.CheckUnmappedBufferDescriptor();
     for (const u32 wave : {32u, 64u}) {
       for (const bool robust : {false, true}) RunCase(&vulkan, BufferTailAccesses(wave, robust));
     }
@@ -59738,6 +59779,7 @@ int main(int argc, char **argv) {
   vulkan.CheckOrderedDispatch();
   vulkan.CheckZeroStrideBufferBinding();
   vulkan.CheckNullStorageBufferDescriptor();
+  vulkan.CheckUnmappedBufferDescriptor();
   vulkan.CheckNullTextureDescriptors();
   vulkan.CheckBdaPageTableUploads();
   vulkan.CheckBdaSyncUploads();
