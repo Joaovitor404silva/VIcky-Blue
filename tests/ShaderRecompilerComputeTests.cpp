@@ -45730,8 +45730,10 @@ void CheckGpuSelectedFormattedRecordStore(VulkanHarness &vulkan) {
   const u32 slot = (4096u + alignment - 1u) / alignment * alignment;
   // Modes: signed bytes, RGBA16 float records, unsigned halfwords, and unsigned halfwords in
   // records wider than the format.
-  for (const u32 mode : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u})
+  for (const u32 mode : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u})
   for (const u32 wave : {32u, 64u}) {
+    // Mode 8 stores x to an RGBA16 unsigned record, which truncates x and zero-fills the rest.
+    const bool rgba16u = mode == 8u;
     // Mode 7 stores x to an RGBA16 float record, which zero-fills y, z and w.
     const bool rgba16x = mode == 7u;
     // Mode 5 stores one dword to a four-component float record, which zero-fills the rest.
@@ -45750,6 +45752,7 @@ void CheckGpuSelectedFormattedRecordStore(VulkanHarness &vulkan) {
                 : rgba32 ? "GpuSelectedFormattedRgba32DwordStore"
                 : rg16 ? "GpuSelectedFormattedRg16UIntStore"
                 : rgba16x ? "GpuSelectedFormattedRgba16XStore"
+                : rgba16u ? "GpuSelectedFormattedRgba16UIntXStore"
                 : half ? "GpuSelectedFormattedUInt16Store" : "GpuSelectedFormattedRecordStore";
     test.initial.assign((slot * 7u + keys.size() * wave * 4u) / 4u, 0xdeadbeefu);
     auto bytes = std::as_writable_bytes(std::span(test.initial));
@@ -45757,8 +45760,9 @@ void CheckGpuSelectedFormattedRecordStore(VulkanHarness &vulkan) {
     for (u32 row = 0; row < 6u; ++row) {
       if (wide && row != 0u && row != 3u) continue;
       const std::array descriptor{slot * (row + 1u),
-          (wide || rgba16x ? 8u : rgba32 ? 16u : rg16 ? 4u : half ? half_stride : byte_stride) << 16u, 20u,
+          (wide || rgba16x || rgba16u ? 8u : rgba32 ? 16u : rg16 ? 4u : half ? half_stride : byte_stride) << 16u, 20u,
           wide || rgba16x ? (u32(Prospero::BufferFormat::k16_16_16_16Float) << 12u) | DstSel(4, 5, 6, 7)
+          : rgba16u ? (u32(Prospero::BufferFormat::k16_16_16_16UInt) << 12u) | DstSel(4, 5, 6, 7)
           : rgba32 ? (u32(Prospero::BufferFormat::k32_32_32_32Float) << 12u) | DstSel(4, 5, 6, 7)
           : rg16 ? (u32(Prospero::BufferFormat::k16_16UInt) << 12u) | DstSel(4, 5, 0, 1)
                : (u32(half ? Prospero::BufferFormat::k16UInt : Prospero::BufferFormat::k8SInt) << 12u) |
@@ -45776,6 +45780,11 @@ void CheckGpuSelectedFormattedRecordStore(VulkanHarness &vulkan) {
           test.initial[record + 1u] = 0xdead0001u;
           test.initial[record + 2u] = 0xdead0002u;
           test.initial[record + 3u] = 0xdead0003u;
+        } else if (rgba16u) {
+          // y, z and w must be zeroed by a store.
+          const auto record = slot * (row + 1u) / 4u + element * 2u;
+          test.initial[record] = 0xdead0000u | (0x2000u + row * 0x100u + element);
+          test.initial[record + 1u] = 0xdeadbeefu;
         } else if (rgba16x) {
           // x is an exact half; y, z and w must be zeroed by a store.
           const auto record = slot * (row + 1u) / 4u + element * 2u;
@@ -45839,7 +45848,7 @@ void CheckGpuSelectedFormattedRecordStore(VulkanHarness &vulkan) {
     } else {
       code.push_back(EncodeVop2(0x1a, 10, InlineU32(5), 0));
       // Halfwords stay in range, so the check does not depend on how an overflow converts.
-      code.insert(code.end(), {EncodeVop2(0x25, 10, 255, 10), rgba32 || rgba16x ? 0x40000000u : half || rg16 ? 0x100u : u32(-200)});
+      code.insert(code.end(), {EncodeVop2(0x25, 10, 255, 10), rgba32 || rgba16x ? 0x40000000u : rgba16u ? 0x12340100u : half || rg16 ? 0x100u : u32(-200)});
     }
     AppendSMovLiteral(&code, 126, 0x55555555u);
     AppendSMovLiteral(&code, 127, wave == 64u ? 0x55555555u : 0u);
@@ -45865,7 +45874,7 @@ void CheckGpuSelectedFormattedRecordStore(VulkanHarness &vulkan) {
         offset += words.size();
       }
       Require(test.name, "one shared store after the null candidate",
-              shared_stores == (wave > vulkan.SubgroupSize() ? 2u : 1u) * (rgba32 || rgba16x ? 4u : rg16 ? 2u : 1u),
+              shared_stores == (wave > vulkan.SubgroupSize() ? 2u : 1u) * (rgba32 || rgba16x || rgba16u ? 4u : rg16 ? 2u : 1u),
               "homogeneous children duplicated the native store per descriptor");
     }
     u32 bda_loads = 0, native_stores = 0;
@@ -45914,7 +45923,7 @@ void CheckGpuSelectedFormattedRecordStore(VulkanHarness &vulkan) {
             valid && lane < 20u ? (wide ? 0x3f800000u
                                    : rgba32 ? 0x3f800000u + row * 0x100u + lane
                                    : rgba16x ? 0x3f800000u + ((row * 0x40u + lane) << 13u)
-                                   : half || rg16 ? 0x2000u + row * 0x100u + lane
+                                   : half || rg16 || rgba16u ? 0x2000u + row * 0x100u + lane
                                           : u32(int32_t(0x80u + row + lane) - 256)) : 0u;
         if (valid && lane < (wide && row == 3u ? 18u : 20u) && (lane & 1u) == 0u) {
           if (wide) {
@@ -45924,6 +45933,11 @@ void CheckGpuSelectedFormattedRecordStore(VulkanHarness &vulkan) {
             const auto record = slot * (row + 1u) / 4u + lane * 4u;
             test.expected[record] = 0x40000000u + lane * 32u;
             test.expected[record + 1u] = test.expected[record + 2u] = test.expected[record + 3u] = 0u;
+          } else if (rgba16u) {
+            // The high bits of the stored dword are dropped.
+            const auto record = slot * (row + 1u) / 4u + lane * 2u;
+            test.expected[record] = (lane * 32u + 0x100u) & 0xffffu;
+            test.expected[record + 1u] = 0u;
           } else if (rgba16x) {
             // 2.0 plus mantissa bits below half precision rounds to exactly 2.0.
             const auto record = slot * (row + 1u) / 4u + lane * 2u;

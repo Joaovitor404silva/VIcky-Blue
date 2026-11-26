@@ -6531,6 +6531,19 @@ void TestBoundedFormattedBufferStore() {
     Check(!materialize(), "an RGBA16 float store candidate accepted a stride it does not address");
     set_rgba16(8u, Libs::Graphics::DstSel(4, 5, 0, 1));
     Check(!materialize(), "an RGBA16 float store candidate accepted non-identity selects");
+    // The unsigned variant truncates x to 16 bits and zero-fills the rest.
+    const auto set_rgba16u = [&](uint32_t stride, uint32_t selects) {
+      set_byte_bounds(stride, 0u, Prospero::BufferFormat::k16_16_16_16UInt);
+      for (uint32_t key = 0; key < 8u; ++key) memory.words[32u + key * 4u + 3u] =
+          (static_cast<uint32_t>(Prospero::BufferFormat::k16_16_16_16UInt) << 12u) | selects;
+    };
+    set_rgba16u(8u, Libs::Graphics::DstSel(4, 5, 6, 7));
+    Check(materialize() && snapshot.buffers.size() == 8u,
+          "a one-component store to a tight RGBA16 unsigned record was refused");
+    set_rgba16u(16u, Libs::Graphics::DstSel(4, 5, 6, 7));
+    Check(!materialize(), "an RGBA16 unsigned store candidate accepted a stride it does not address");
+    set_rgba16u(8u, Libs::Graphics::DstSel(4, 5, 0, 1));
+    Check(!materialize(), "an RGBA16 unsigned store candidate accepted non-identity selects");
     // A one-component format's missing channels default to 0,0,0 or 0,0,1, both identity; any
     // other select pattern is still refused.
     set_byte_bounds(1u, 0u, Prospero::BufferFormat::k8UInt);
