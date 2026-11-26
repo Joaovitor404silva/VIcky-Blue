@@ -255,7 +255,9 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 			     descriptor.Format() == Prospero::BufferFormat::k8UInt ||
 			     descriptor.Format() == Prospero::BufferFormat::k16SInt ||
 			     descriptor.Format() == Prospero::BufferFormat::k16UInt);
-			const bool rgba16 = resource.max_byte_extent == 16u &&
+			// A four-component store fills the record; a one-component store converts x and
+			// zero-fills the rest.
+			const bool rgba16 = (resource.max_byte_extent == 16u || resource.max_byte_extent == 4u) &&
 			    descriptor.Format() == Prospero::BufferFormat::k16_16_16_16Float;
 			// A dword store to a four-component float record zero-fills the other channels.
 			const bool rgba32 = resource.max_byte_extent == 4u &&

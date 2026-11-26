@@ -6518,6 +6518,19 @@ void TestBoundedFormattedBufferStore() {
     Check(!materialize(), "a two-halfword store candidate accepted a stride it does not address");
     set_rg16(4u, Libs::Graphics::DstSel(4, 0, 0, 1));
     Check(!materialize(), "a two-halfword store candidate accepted non-identity selects");
+    // A one-component store to an RGBA16 float record converts x and zero-fills the rest.
+    const auto set_rgba16 = [&](uint32_t stride, uint32_t selects) {
+      set_byte_bounds(stride, 0u, Prospero::BufferFormat::k16_16_16_16Float);
+      for (uint32_t key = 0; key < 8u; ++key) memory.words[32u + key * 4u + 3u] =
+          (static_cast<uint32_t>(Prospero::BufferFormat::k16_16_16_16Float) << 12u) | selects;
+    };
+    set_rgba16(8u, Libs::Graphics::DstSel(4, 5, 6, 7));
+    Check(materialize() && snapshot.buffers.size() == 8u,
+          "a one-component store to a tight RGBA16 float record was refused");
+    set_rgba16(16u, Libs::Graphics::DstSel(4, 5, 6, 7));
+    Check(!materialize(), "an RGBA16 float store candidate accepted a stride it does not address");
+    set_rgba16(8u, Libs::Graphics::DstSel(4, 5, 0, 1));
+    Check(!materialize(), "an RGBA16 float store candidate accepted non-identity selects");
     // A one-component format's missing channels default to 0,0,0 or 0,0,1, both identity; any
     // other select pattern is still refused.
     set_byte_bounds(1u, 0u, Prospero::BufferFormat::k8UInt);
@@ -7485,8 +7498,10 @@ void TestGpuSelectedFormattedRecordStore() {
     Check(!wide_materialize(), "RGBA16 store accepted unproved format, alignment, stride, bounds or swizzle");
     field = saved;
   }
-  wide_plan.info.buffers[wide_root].max_byte_extent = 4u;
-  Check(!wide_materialize(), "scalar formatted store incorrectly admitted an RGBA16 candidate");
+  // A one-component store converts x and zero-fills the rest (GPU-checked by
+  // GpuSelectedFormattedRgba16XStore); a partial two-component store is still unproved.
+  wide_plan.info.buffers[wide_root].max_byte_extent = 8u;
+  Check(!wide_materialize(), "two-component formatted store incorrectly admitted an RGBA16 candidate");
   wide_plan.info.buffers[wide_root].max_byte_extent = 16u;
   auto& wide_indirect = *wide_plan.descriptor_sources[
       wide_plan.info.buffers[wide_root].source].indirect_descriptor;
