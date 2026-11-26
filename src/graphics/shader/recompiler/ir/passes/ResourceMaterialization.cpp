@@ -266,8 +266,10 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 			const bool rgba32 = resource.max_byte_extent == 4u &&
 			    descriptor.Format() == Prospero::BufferFormat::k32_32_32_32Float;
 			// A store to a two-halfword unsigned record zero-fills y.
+			// The same holds for a two-byte unsigned record, which truncates x to 8 bits.
 			const bool rg16 = resource.max_byte_extent == 4u &&
-			    descriptor.Format() == Prospero::BufferFormat::k16_16UInt;
+			    (descriptor.Format() == Prospero::BufferFormat::k16_16UInt ||
+			     descriptor.Format() == Prospero::BufferFormat::k8_8UInt);
 			// A one-component format's missing channels default to 0,0,0 or 0,0,1, both identity,
 			// and a two-component format's to 0,1.
 			const auto selects = descriptor.DstSelXYZW();
@@ -279,7 +281,7 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 			const bool tight_enough = descriptor.Stride() == format.byte_size || byte_indexed ||
 			    (scalar && format.byte_size < 4u && descriptor.Stride() > format.byte_size);
 			if ((!scalar && !rgba16 && !rgba32 && !rg16) || !tight_enough || !identity)
-				return SpecializationFail(fmt::format("indirect formatted stores require an identity 8- or 16-bit integer, UInt32, RG16UInt, RGBA16Float, RGBA16UInt or RGBA32Float "
+				return SpecializationFail(fmt::format("indirect formatted stores require an identity 8- or 16-bit integer, UInt32, RG8UInt, RG16UInt, RGBA16Float, RGBA16UInt or RGBA32Float "
 				    "records: descriptor={:08x},{:08x},{:08x},{:08x} stride={} format={} max_extent={}",
 				    value.dwords[0], value.dwords[1], value.dwords[2], value.dwords[3],
 				    descriptor.Stride(), static_cast<uint32_t>(descriptor.Format()), resource.max_byte_extent));

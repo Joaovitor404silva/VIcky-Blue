@@ -6531,6 +6531,19 @@ void TestBoundedFormattedBufferStore() {
     Check(!materialize(), "an RGBA16 float store candidate accepted a stride it does not address");
     set_rgba16(8u, Libs::Graphics::DstSel(4, 5, 0, 1));
     Check(!materialize(), "an RGBA16 float store candidate accepted non-identity selects");
+    // A store to a two-byte unsigned record truncates x to 8 bits and zero-fills y.
+    const auto set_rg8 = [&](uint32_t stride, uint32_t selects) {
+      set_byte_bounds(stride, 0u, Prospero::BufferFormat::k8_8UInt);
+      for (uint32_t key = 0; key < 8u; ++key) memory.words[32u + key * 4u + 3u] =
+          (static_cast<uint32_t>(Prospero::BufferFormat::k8_8UInt) << 12u) | selects;
+    };
+    set_rg8(2u, Libs::Graphics::DstSel(4, 5, 0, 1));
+    Check(materialize() && snapshot.buffers.size() == 8u,
+          "a store to a tight two-byte unsigned record was refused");
+    set_rg8(4u, Libs::Graphics::DstSel(4, 5, 0, 1));
+    Check(!materialize(), "a two-byte store candidate accepted a stride it does not address");
+    set_rg8(2u, Libs::Graphics::DstSel(4, 0, 0, 1));
+    Check(!materialize(), "a two-byte store candidate accepted non-identity selects");
     // The unsigned variant truncates x to 16 bits and zero-fills the rest.
     const auto set_rgba16u = [&](uint32_t stride, uint32_t selects) {
       set_byte_bounds(stride, 0u, Prospero::BufferFormat::k16_16_16_16UInt);
