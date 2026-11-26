@@ -6443,10 +6443,14 @@ void TestBoundedFormattedBufferStore() {
         memory.words[word + 3u] = static_cast<uint32_t>(format) << 12u | 4u | oob << 28u;
       }
     };
-    set_byte_bounds(1u, 3u);
+    set_byte_bounds(1u, 3u, Prospero::BufferFormat::k8UInt);
     Check(materialize() && snapshot.buffers.size() == 8u &&
               snapshot.buffers[0].dwords[2] == lengths[0] * 4u,
           "byte-addressed formatted store candidates were refused");
+    // A byte index reaches unaligned addresses, which only a one-byte format can store to; a
+    // 32-bit store would land on the aligned word that contains it.
+    set_byte_bounds(1u, 3u);
+    Check(!materialize(), "byte-indexed UInt32 store candidates could address unaligned words");
     for (const auto [stride, oob] : std::array<std::pair<uint32_t, uint32_t>, 3>{
              {{1u, 0u}, {2u, 3u}, {4u, 3u}}}) {
       set_byte_bounds(stride, oob);

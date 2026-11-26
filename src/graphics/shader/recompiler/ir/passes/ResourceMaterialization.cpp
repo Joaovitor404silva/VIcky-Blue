@@ -229,8 +229,11 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 		return true;
 	}
 	// A stride-1 descriptor with byte bounds is indexed by byte, which is what the index check
-	// emitted for candidates computes, so it needs no record geometry of its own.
-	const bool byte_indexed = indexed && descriptor.Stride() == 1u && descriptor.OutOfBounds() == 3u;
+	// emitted for candidates computes, so it needs no record geometry of its own. A formatted
+	// access wider than a byte could then start on an unaligned byte, which the word-granular
+	// storage views would silently move to the containing word, so it keeps the aligned rules.
+	const bool byte_indexed = indexed && descriptor.Stride() == 1u && descriptor.OutOfBounds() == 3u &&
+	    (!resource.formatted || Format::GetFormatInfo(descriptor.Format()).byte_size == 1u);
 	if (descriptor.SwizzleEnabled() || descriptor.AddTid() ||
 	    (descriptor.OutOfBounds() != (indexed ? 0u : 3u) && !byte_indexed)) {
 		return SpecializationFail(fmt::format(
