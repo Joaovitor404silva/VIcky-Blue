@@ -328,6 +328,12 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 	           (indexed && resource.max_byte_extent != 1u &&
 	            (descriptor.Stride() < resource.max_byte_extent || (descriptor.Stride() & 3u) != 0u))) {
 		return SpecializationFail("indirect buffer stores require byte addressing or aligned records covering the write");
+	} else if (indexed && descriptor.Stride() == 0u) {
+		// The emitter and the runtime-layout classes read a stride-0 candidate as a null buffer
+		// (ResourceSpecialization::BufferLayoutClass::empty), so a mapped one cannot be addressed.
+		return SpecializationFail(fmt::format(
+		    "indirect indexed buffers require a non-zero stride: descriptor={:08x},{:08x},{:08x},{:08x}",
+		    value.dwords[0], value.dwords[1], value.dwords[2], value.dwords[3]));
 	}
 	return true;
 }

@@ -29,6 +29,8 @@ struct ResourceSpecialization {
 		uint32_t               root    = 0;
 		Prospero::BufferFormat format  = Prospero::BufferFormat::kInvalid;
 		uint32_t               swizzle = DstSel(4, 5, 6, 7);
+		// Stride 0: a null (or all-out-of-bounds formatted) candidate. NormalizeIndirectBuffer
+		// rejects mapped indexed candidates with stride 0, so no addressable buffer lands here.
 		bool                   empty   = false;
 		auto                   operator<=>(const BufferLayoutClass&) const = default;
 	};

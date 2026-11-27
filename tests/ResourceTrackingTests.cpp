@@ -6841,6 +6841,16 @@ void TestBoundedBufferRecords(uint32_t d32_components) {
     std::ranges::copy(saved, memory.words.begin() + row);
     Check(materialize(), "restored record table no longer materialized");
   }
+  // Stride-0 candidates are read as null buffers, so a mapped, written one with stride 0 cannot
+  // be addressed and must fail specialization instead of silently dropping its accesses.
+  {
+    const auto stride_word = (table_offset + 1u * 192u + 176u) / 4u + 1u;
+    const auto saved = memory.words[stride_word];
+    memory.words[stride_word] = 0u;
+    Check(!materialize(), "a mapped stride-0 indexed buffer candidate was accepted as a null buffer");
+    memory.words[stride_word] = saved;
+    Check(materialize(), "restored record table no longer materialized");
+  }
   const auto original = specialization;
   memory.words[(table_offset + 160u) / 4u] += 0x100u;
   Check(materialize() && specialization == original,
