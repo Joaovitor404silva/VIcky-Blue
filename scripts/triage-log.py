@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from collections import Counter, OrderedDict
@@ -163,7 +164,9 @@ def parse(path):
 
 
 def policy_ok(text):
-    proc = subprocess.run(["bash", os.path.join(HERE, "policy-check.sh"), "text", "triage report"],
+    # Windows resolves a bare "bash" to System32's WSL launcher before PATH; Git Bash is on PATH.
+    bash = shutil.which("bash") or "bash"
+    proc = subprocess.run([bash, os.path.join(HERE, "policy-check.sh"), "text", "triage report"],
                           input=text.encode("utf-8"), cwd=ROOT)
     return proc.returncode == 0
 
