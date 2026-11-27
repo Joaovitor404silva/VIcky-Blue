@@ -49393,12 +49393,16 @@ constexpr ImageAtomicIntegerCase ImageAtomicIntegerCases[] = {
      {0xfffffffeu, 0xfffffffeu, 0xffffffffu, 0xfffffffeu, 0xffffffffu}},
 };
 
-TestCase ImageAtomicIntegerGlcAndExec(const ImageAtomicIntegerCase &atomic, bool wide) {
+// float_image: the descriptor says 32Float or 32_32Float; the atomic still acts on the texel bits.
+TestCase ImageAtomicIntegerGlcAndExec(const ImageAtomicIntegerCase &atomic, bool wide,
+                                      bool float_image = false) {
   const u32 texel_dwords = wide ? 2 : 1;
   TestCase test;
-  test.name = wide ? atomic.name64 : atomic.name32;
-  test.user_data = MakeStorageTextureData(wide ? Prospero::BufferFormat::k32_32UInt
-                                              : Prospero::BufferFormat::k32UInt);
+  test.name = float_image ? (wide ? "ImageAtomicUMax64OnFloatImage" : "ImageAtomicUMax32OnFloatImage")
+                          : wide ? atomic.name64 : atomic.name32;
+  using F = Prospero::BufferFormat;
+  test.user_data = MakeStorageTextureData(
+      wide ? (float_image ? F::k32_32Float : F::k32_32UInt) : (float_image ? F::k32Float : F::k32UInt));
   test.has_user_data = true;
   test.storage_image_r32ui.assign(16 * texel_dwords, 0);
   test.expected_storage_image_r32ui = test.storage_image_r32ui;
@@ -51102,6 +51106,10 @@ std::vector<TestCase> MakeCases() {
   for (const auto &atomic : ImageAtomicIntegerCases) {
     cases.push_back(ImageAtomicIntegerGlcAndExec(atomic, false));
     cases.push_back(ImageAtomicIntegerGlcAndExec(atomic, true));
+    if (atomic.opcode == ShaderOpcode::IMAGE_ATOMIC_UMAX) {
+      cases.push_back(ImageAtomicIntegerGlcAndExec(atomic, false, true));
+      cases.push_back(ImageAtomicIntegerGlcAndExec(atomic, true, true));
+    }
   }
   AddCase(ImageAtomicFloatGlcAndExec<true>);
   AddCase(ImageAtomicFloatGlcAndExec<false>);
@@ -53737,6 +53745,13 @@ ShaderTextureResource AtomicStorageTextureDescriptor() {
     descriptor.fields[1] =
         (descriptor.fields[1] & ~0x1ff00000u) |
         (static_cast<uint32_t>(Prospero::BufferFormat::k8UInt) << 20u);
+  } else if (std::strcmp(kind, "atomic64-narrow-float") == 0) {
+    resource = AtomicStorageTextureResource();
+    resource.atomic64 = true;
+    descriptor = AtomicStorageTextureDescriptor();
+    descriptor.fields[1] =
+        (descriptor.fields[1] & ~0x1ff00000u) |
+        (static_cast<uint32_t>(Prospero::BufferFormat::k32Float) << 20u);
   } else if (std::strcmp(kind, "depth-tile-read") == 0) {
     resource = Ppsa14053DepthTileStorageTextureResource();
     descriptor = Ppsa14053DepthTileStorageTextureDescriptor();
@@ -54175,6 +54190,20 @@ void CheckBasicStorageTextureDescriptor() {
               atomic.DstSelXYZW() == DstSel(4, 0, 0, 1),
           "PPSA22102 image-atomic descriptor fixture is malformed");
   ValidateStorageTexture(AtomicStorageTextureResource(), atomic, 0x10000);
+  // Atomics act on texel bits through an unsigned view, so float images of the atomic's
+  // width are accepted: R32_UINT over 32Float, R64_UINT over 32_32UInt and 32_32Float.
+  const auto with_format = [&](Prospero::BufferFormat format) {
+    auto descriptor = atomic;
+    descriptor.fields[1] =
+        (descriptor.fields[1] & ~0x1ff00000u) | (static_cast<uint32_t>(format) << 20u);
+    return descriptor;
+  };
+  ValidateStorageTexture(AtomicStorageTextureResource(),
+                         with_format(Prospero::BufferFormat::k32Float), 0x10000);
+  auto atomic64 = AtomicStorageTextureResource();
+  atomic64.atomic64 = true;
+  for (const auto format : {Prospero::BufferFormat::k32_32UInt, Prospero::BufferFormat::k32_32Float})
+    ValidateStorageTexture(atomic64, with_format(format), 0x20000);
 
   char path[MAX_PATH]{};
   Require("BasicStorageTexture", "host",
@@ -54196,6 +54225,7 @@ void CheckBasicStorageTextureDescriptor() {
                            "uint-format",
                            "uint-resource-float-format",
                            "atomic-format",
+                           "atomic64-narrow-float",
                            "depth-tile-read",
                            "depth-tile-extent",
                            "depth-tile-fmask"}) {
@@ -59059,6 +59089,10 @@ int main(int argc, char **argv) {
     for (const auto &atomic : ImageAtomicIntegerCases) {
       RunCase(&vulkan, ImageAtomicIntegerGlcAndExec(atomic, false));
       RunCase(&vulkan, ImageAtomicIntegerGlcAndExec(atomic, true));
+      if (atomic.opcode == ShaderOpcode::IMAGE_ATOMIC_UMAX) {
+        RunCase(&vulkan, ImageAtomicIntegerGlcAndExec(atomic, false, true));
+        RunCase(&vulkan, ImageAtomicIntegerGlcAndExec(atomic, true, true));
+      }
     }
     return 0;
   }
