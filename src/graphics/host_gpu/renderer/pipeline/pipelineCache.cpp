@@ -459,6 +459,50 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 		}
 		if (!specialized) return SkipRespecialization(entry->second, params.hash, options.stage);
 	}
+	if (const auto& program = entry->second; !program.modules.empty()) {
+		// Another module of a known program: which input none of its modules had.
+		const auto code = program.FunctionCode();
+		const bool new_code = std::ranges::none_of(program.modules, [&](const ShaderModule& m) {
+			return std::ranges::equal(m.function_code, code);
+		});
+		const bool new_resources = std::ranges::none_of(program.modules, [&](const ShaderModule& m) {
+			return m.specialization == program.specialization;
+		});
+		// The resources that differ from the last module's.
+		const auto& last = program.modules.back().specialization;
+		const auto& now  = program.specialization;
+		std::string differ;
+		const auto  slots = [&](const char* name, const auto& a, const auto& b) {
+            for (size_t i = 0; i < std::max(a.size(), b.size()); i++) {
+                if (i >= a.size() || i >= b.size() || !(a[i] == b[i])) differ += fmt::format(" {}{}", name, i);
+            }
+		};
+		slots("b", last.buffers, now.buffers);
+		slots("i", last.images, now.images);
+		slots("s", last.samplers, now.samplers);
+		if (last.buffer_layout_classes != now.buffer_layout_classes) differ += " layout_classes";
+		PipelineCacheLog("variant {} of shader=0x{:016x}: new callee code={} new resources={} "
+		                 "differs from last:{}",
+		                 program.modules.size() + 1, params.hash, new_code, new_resources, differ);
+	}
+	// A program that respecializes on its buffers alone keeps meeting new table states (a
+	// captured compute shader compiled seven modules of seconds each in one cutscene): its tables
+	// take runtime layouts from now on, so later states share the module compiled next.
+	if (auto& program = entry->second;
+	    !program.modules.empty() && program.resource_plan.runtime_layout_min_candidates == 0u &&
+	    program.modules.back().specialization.buffers != program.specialization.buffers &&
+	    std::ranges::any_of(program.modules, [&](const ShaderModule& m) {
+		    return std::ranges::equal(m.function_code, program.FunctionCode());
+	    })) {
+		program.resource_plan.runtime_layout_min_candidates = 2u;
+		PipelineCacheLog("shader=0x{:016x}: buffer tables respecialized, runtime layouts from now on",
+		                 params.hash);
+		bool specialized = true;
+		const auto* module = program.call_source ? program.FindModule<true>(runtime, push_data, specialized)
+		                                         : program.FindModule<false>(runtime, push_data, specialized);
+		if (!specialized) return SkipRespecialization(program, params.hash, options.stage);
+		if (module != nullptr) return bind(*module);
+	}
 	return bind(CompileModule(entry->second, entry->first, options, std::move(translated),
 	                          push_data));
 }
@@ -474,6 +518,23 @@ PipelineCache::PipelineCache(GraphicContext&                         graphics,
 	}
 	InitializeDriverCache();
 	WarmUp(shader_store);
+}
+
+// A pipeline creation that held the render thread for 100 ms or more, with its stages' hashes.
+template <size_t N>
+static void LogSlowPipeline(const char* kind, const PipelineCache::Pipeline& pipeline,
+                            const std::array<const ShaderModule*, N>&  stages,
+                            std::chrono::steady_clock::time_point      start) {
+	const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+	                    std::chrono::steady_clock::now() - start)
+	                    .count();
+	if (ms < 100) return;
+	std::string hashes;
+	for (const auto* stage: stages) {
+		if (stage != nullptr) hashes += fmt::format(" 0x{:016x}", stage->info.shader_hash);
+	}
+	PipelineCacheLog("slow {} pipeline: {} ms{} stages:{}", kind, ms,
+	                 pipeline.unoptimized ? " (unoptimized)" : "", hashes);
 }
 
 PipelineBuild PipelineCache::FirstBuild() const {
@@ -1145,7 +1206,9 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(const CommandBuffer&
 		Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::PipelinesCreated,
 		                                         Common::DebugCounters::Counter::PipelineCreateNs,
 		                                         Common::DebugCounters::Peak::PipelineCreateNs);
+		const auto start = std::chrono::steady_clock::now();
 		CreatePipelineInternal(m_graphics, pipeline, key, stages, m_driver_cache, FirstBuild());
+		LogSlowPipeline("graphics", pipeline, stages, start);
 	}
 	// The worker gets copies: program module lists may grow while it builds.
 	auto modules = std::make_shared<std::array<std::optional<ShaderModule>, 4>>();
@@ -1186,7 +1249,9 @@ PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeIn
 		Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::PipelinesCreated,
 		                                         Common::DebugCounters::Counter::PipelineCreateNs,
 		                                         Common::DebugCounters::Peak::PipelineCreateNs);
+		const auto start = std::chrono::steady_clock::now();
 		CreatePipelineInternal(m_graphics, pipeline, module, m_driver_cache, FirstBuild());
+		LogSlowPipeline("compute", pipeline, std::array<const ShaderModule*, 1> {&module}, start);
 	}
 	QueueOptimized(pipeline, [this, module = std::make_shared<ShaderModule>(module)](Pipeline& layouts) {
 		CreatePipelineInternal(m_graphics, layouts, *module, m_driver_cache, PipelineBuild::Optimize);

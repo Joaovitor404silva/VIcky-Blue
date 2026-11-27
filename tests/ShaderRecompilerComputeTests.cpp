@@ -45768,8 +45768,9 @@ void CheckGuardedWaterfallBufferRecords(VulkanHarness &vulkan) {
 
 void CheckGpuSelectedFormattedRecordStore(VulkanHarness &vulkan) {
   struct RestoreRuntimeLayoutThreshold {
+    u32 threshold = Libs::Graphics::ShaderRecompiler::IR::RuntimeLayoutMinCandidates();
     ~RestoreRuntimeLayoutThreshold() {
-      Libs::Graphics::ShaderRecompiler::IR::SetRuntimeLayoutMinCandidatesForTests(256u);
+      Libs::Graphics::ShaderRecompiler::IR::SetRuntimeLayoutMinCandidatesForTests(threshold);
     }
   } restore_threshold;
   constexpr u32 selectors = 128, table = 256, stride = 592, member = 448;

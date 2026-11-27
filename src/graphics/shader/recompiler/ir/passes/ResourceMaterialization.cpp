@@ -21,6 +21,16 @@ namespace Libs::Graphics::ShaderRecompiler::IR {
 
 namespace {
 uint32_t g_runtime_layout_min_candidates = 256u;
+
+// A runtime-layout table's candidate slots: a power of two of at least RuntimeLayoutMinSlots and
+// never fewer than the plan padded to before, so its descriptor array, and the module, stay the
+// same while candidates come and go.
+uint32_t RuntimeLayoutSlots(const ResourcePlan& plan, uint32_t root, uint32_t candidates) {
+	if (plan.runtime_layout_slots.size() <= root) plan.runtime_layout_slots.resize(root + 1u, 0u);
+	auto& slots = plan.runtime_layout_slots[root];
+	slots = std::max(slots, std::bit_ceil(std::max(candidates, RuntimeLayoutMinSlots)));
+	return slots;
+}
 } // namespace
 
 uint32_t RuntimeLayoutMinCandidates() {
@@ -29,6 +39,11 @@ uint32_t RuntimeLayoutMinCandidates() {
 
 void SetRuntimeLayoutMinCandidatesForTests(uint32_t candidates) {
 	g_runtime_layout_min_candidates = candidates;
+}
+
+uint32_t RuntimeLayoutMinCandidates(const ResourcePlan& plan) {
+	return plan.runtime_layout_min_candidates != 0u ? plan.runtime_layout_min_candidates
+	                                                : g_runtime_layout_min_candidates;
 }
 
 namespace {
@@ -881,11 +896,11 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 					// candidates to a power of two, so its rows do not specialize the module.
 					const auto children = static_cast<uint32_t>(descriptors.size() - children_begin);
 					if (pointer == nullptr && !program.info.buffers[resource_index].atomic &&
-					    children >= RuntimeLayoutMinCandidates()) {
+					    children >= RuntimeLayoutMinCandidates(program)) {
 						root.runtime_layout = true;
 						auto child = root_resource;
 						child.indirect_root = resource_index;
-						for (auto padded = std::bit_ceil(children); padded > children; --padded) {
+						for (auto padded = RuntimeLayoutSlots(program, resource_index, children); padded > children; --padded) {
 							descriptors.push_back({.dword_count = dword_count});
 							specializations.push_back(child);
 						}
@@ -985,11 +1000,11 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 		if constexpr (std::is_same_v<Specialization, ResourceSpecialization::Buffer>) {
 			// As for plain tables; the runtime words follow the key/ordinal pairs.
 			const auto children = static_cast<uint32_t>(descriptors.size() - children_begin);
-			if (!program.info.buffers[resource_index].atomic && children >= RuntimeLayoutMinCandidates()) {
+			if (!program.info.buffers[resource_index].atomic && children >= RuntimeLayoutMinCandidates(program)) {
 				root.runtime_layout = true;
 				auto child = root_resource;
 				child.indirect_root = resource_index;
-				for (auto padded = std::bit_ceil(children); padded > children; --padded) {
+				for (auto padded = RuntimeLayoutSlots(program, resource_index, children); padded > children; --padded) {
 					descriptors.push_back({.dword_count = dword_count});
 					specializations.push_back(child);
 				}
@@ -2336,13 +2351,13 @@ void IoValues(Reader& reader, std::list<Inst>& values, ControlPhis& phis) {
 template <class S, class P> void IoPlan(S& io, P& plan) {
 	auto& [stage, shader_hash, user_data_base, user_data_count, values, memory_info, descriptor_sources,
 	       selector_groups, control_flow, control_phis, srt_reads, source_reads, capture_specialization_reads,
-	       srt_plan_complete, resource_tracking_complete, info, uniform_fill,
+	       srt_plan_complete, resource_tracking_complete, runtime_layout_min_candidates, runtime_layout_slots, info, uniform_fill,
 	       // Derived on load.
 	       srt_code, srt_user_data, srt_captures, srt_scratch, material_keys, selector_keys] = plan;
 	IoValues(io, values, control_phis);
 	IoAll(io, stage, shader_hash, user_data_base, user_data_count, memory_info, descriptor_sources,
 	      selector_groups, control_flow, srt_reads, source_reads, capture_specialization_reads,
-	      srt_plan_complete, resource_tracking_complete, info, uniform_fill);
+	      srt_plan_complete, resource_tracking_complete, runtime_layout_min_candidates, runtime_layout_slots, info, uniform_fill);
 }
 
 } // namespace
@@ -2351,6 +2366,18 @@ std::vector<uint8_t> SaveResourcePlan(const ResourcePlan& plan) {
 	Writer writer;
 	IoPlan(writer, plan);
 	return std::move(writer.bytes);
+}
+
+void MergeRuntimeLayoutState(ResourcePlan& plan, const ResourcePlan& other) {
+	if (other.runtime_layout_min_candidates != 0u &&
+	    (plan.runtime_layout_min_candidates == 0u ||
+	     other.runtime_layout_min_candidates < plan.runtime_layout_min_candidates)) {
+		plan.runtime_layout_min_candidates = other.runtime_layout_min_candidates;
+	}
+	auto& slots = plan.runtime_layout_slots;
+	if (slots.size() < other.runtime_layout_slots.size()) slots.resize(other.runtime_layout_slots.size(), 0u);
+	for (size_t i = 0; i < other.runtime_layout_slots.size(); ++i)
+		slots[i] = std::max(slots[i], other.runtime_layout_slots[i]);
 }
 
 bool LoadResourcePlan(std::span<const uint8_t> bytes, ResourcePlan& plan) {

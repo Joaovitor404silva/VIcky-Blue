@@ -66,10 +66,15 @@ struct ResourceSpecialization {
 	bool operator==(const ResourceSpecialization&) const = default;
 };
 
+// A runtime-layout table has at least this many candidate slots (null descriptors pad it).
+inline constexpr uint32_t RuntimeLayoutMinSlots = 64u;
+
 // GPU-selected buffer tables with at least this many distinct candidates take their candidates'
 // layouts from runtime words (ResourceSpecialization::Buffer::runtime_layout).
 uint32_t RuntimeLayoutMinCandidates();
 void     SetRuntimeLayoutMinCandidatesForTests(uint32_t candidates);
+// The threshold for plan: its own (ResourcePlan::runtime_layout_min_candidates) or the global one.
+uint32_t RuntimeLayoutMinCandidates(const ResourcePlan& plan);
 
 // Extracts the descriptor/SRT value graph before resource specialization. The returned plan owns
 // its values and is independent of the translated shader CFG.
@@ -79,6 +84,9 @@ ResourcePlan ExtractResourcePlan(const Program& program);
 // and scratch state like extraction. A failed load leaves a plan that must not be used.
 std::vector<uint8_t> SaveResourcePlan(const ResourcePlan& plan);
 bool                 LoadResourcePlan(std::span<const uint8_t> bytes, ResourcePlan& plan);
+// Takes the lowered threshold and the larger slots of another record of the same program, so a
+// program loaded from several store records keeps what it learned in the last run.
+void                 MergeRuntimeLayoutState(ResourcePlan& plan, const ResourcePlan& other);
 
 // Refreshes cached resources and specialization in place. A failed refresh must not be used.
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,

@@ -7777,7 +7777,7 @@ void TestGpuKeyedRawIndexedStore() {
   // The table is scanned whole, so a long table of few distinct descriptors must still
   // specialize: only the distinct candidates are bound, not the rows.
   auto fixture = make(true, true);
-  const auto plan = ExtractResourcePlan(fixture->program);
+  auto plan = ExtractResourcePlan(fixture->program);
   for (const uint32_t rows : {1000u, 196608u, MaxIndirectTableRows, MaxIndirectTableRows + 1u}) {
     constexpr uint32_t table = 0x2000u;
     constexpr uint32_t distinct = 10u;
@@ -7896,6 +7896,53 @@ void TestGpuKeyedRawIndexedStore() {
       if (small.buffers[i].indirect_root == small_root && i != small_root)
         compile_time = (small.buffers[i].packed_stride & 0x3fffu) != 0u;
     Check(compile_time, "small descriptor table lost its compile-time candidate layouts");
+    // A program whose small tables keep changing (a captured compute shader's tables hold 10 to
+    // 50 rows that come and go, and each new state compiled 72,000 SPIR-V words, seconds of
+    // driver time) has its plan lowered to runtime layouts. Its candidates are padded to at least
+    // RuntimeLayoutMinSlots, so states up to that many candidates share one module.
+    plan.runtime_layout_min_candidates = 2u;
+    plan.runtime_layout_slots.clear(); // The 1,000-row tables above grew them.
+    ResourceSnapshot churn_snapshot, churn_changed_snapshot, churn_grown_snapshot;
+    ResourceSpecialization churn, churn_changed, churn_grown;
+    Check(materialize(20u, 0u, churn_snapshot, churn) &&
+              materialize(20u, 1u, churn_changed_snapshot, churn_changed) &&
+              materialize(40u, 2u, churn_grown_snapshot, churn_grown),
+          "small table with runtime layouts did not specialize");
+    Check(churn == churn_changed, "rows changing layout changed a runtime-layout small table");
+    Check(churn == churn_grown, "more candidates changed a runtime-layout small table");
+    Check(churn_snapshot.flattened_srt != churn_changed_snapshot.flattened_srt,
+          "row layouts are not in the runtime words of a runtime-layout small table");
+    // The captured table's candidates hovered around 64 and 128, and each crossing back and forth
+    // compiled a module again. The slots only grow, so a table that shrinks keeps its module.
+    ResourceSnapshot wide_snapshot, narrow_snapshot;
+    ResourceSpecialization wide, narrow;
+    Check(materialize(100u, 0u, wide_snapshot, wide) && materialize(40u, 1u, narrow_snapshot, narrow),
+          "growing runtime-layout table did not specialize");
+    Check(wide != churn, "a runtime-layout table past its slots kept its specialization");
+    Check(wide == narrow, "a runtime-layout table that shrank changed its specialization");
+    // A shader store keeps the plan of each module's record, and a restart loads the program's
+    // first: the later records' lowered threshold and grown slots must carry over, or every
+    // run churns through the same modules again before it lowers.
+    {
+      const auto saved_slots = plan.runtime_layout_slots;
+      ResourcePlan first;
+      Check(LoadResourcePlan(SaveResourcePlan(ExtractResourcePlan(fixture->program)), first) &&
+                first.runtime_layout_min_candidates == 0u,
+            "a fresh plan did not round-trip through the store");
+      ResourcePlan later;
+      Check(LoadResourcePlan(SaveResourcePlan(plan), later), "a lowered plan did not round-trip");
+      MergeRuntimeLayoutState(first, later);
+      Check(first.runtime_layout_min_candidates == 2u && first.runtime_layout_slots == saved_slots,
+            "a restart lost a program's runtime layout threshold or slots");
+      ResourcePlan unlowered;
+      Check(LoadResourcePlan(SaveResourcePlan(ExtractResourcePlan(fixture->program)), unlowered),
+            "a fresh plan did not round-trip through the store");
+      MergeRuntimeLayoutState(first, unlowered);
+      Check(first.runtime_layout_min_candidates == 2u && first.runtime_layout_slots == saved_slots,
+            "an earlier record undid a program's runtime layout state");
+    }
+    plan.runtime_layout_min_candidates = 0u;
+    plan.runtime_layout_slots.clear();
   }
 }
 

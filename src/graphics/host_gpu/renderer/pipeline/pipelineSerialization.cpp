@@ -223,6 +223,13 @@ bool PipelineCache::LoadRecord(std::span<const uint8_t>& records) {
 				m_program_cache.erase(program);
 				return false;
 			}
+			if (!inserted) {
+				// A later record's plan carries what the program learned since its first:
+				// lowered runtime layout threshold and grown table slots.
+				ShaderRecompiler::IR::ResourcePlan later;
+				if (!ShaderRecompiler::IR::LoadResourcePlan(plan, later)) return false;
+				ShaderRecompiler::IR::MergeRuntimeLayoutState(program->second.resource_plan, later);
+			}
 			module.module = CompileSPV(spirv, m_graphics.device);
 			program->second.modules.push_back(std::move(module));
 			break;
