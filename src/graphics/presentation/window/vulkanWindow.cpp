@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fmt/format.h>
 #include <memory>
@@ -1018,6 +1019,12 @@ void WindowContext::CreateVulkan() {
 	}
 
 	render_context = std::make_unique<RenderContext>(graphic_ctx);
+	if (Config::BuildShaderCache()) {
+		// The pipeline cache rebuilt its store from the recipes while it was made.
+		render_context->GetPipelineCache().Save();
+		Log::WriteToConsoleAndLog("Shader cache: built, exiting before the title runs\n");
+		std::quick_exit(0);
+	}
 	LibKernel::Memory::InstallGpuResources(render_context.get());
 	presenter = std::make_unique<Presenter>(*this);
 	Vr::OpenXrStartSession(graphic_ctx);

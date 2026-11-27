@@ -174,7 +174,11 @@ bool ShaderValidationEnabled() {
 }
 
 bool ShaderCacheEnabled() {
-	return g_config->shader_cache_enabled;
+	return g_config->shader_cache_enabled || g_config->build_shader_cache;
+}
+
+bool BuildShaderCache() {
+	return g_config->build_shader_cache;
 }
 
 LogDirection GetShaderLogDirection() {
