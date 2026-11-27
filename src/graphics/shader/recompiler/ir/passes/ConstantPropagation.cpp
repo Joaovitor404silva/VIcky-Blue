@@ -2,10 +2,8 @@
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
 #include <algorithm>
-#include <array>
 #include <bit>
 #include <cstdint>
-#include <functional>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -1003,54 +1001,6 @@ void ConstantPropagationPass(const BlockList& blocks, uint32_t wave_size) {
 			const auto* source = Arg(inst, 0).TryInstruction();
 			if (source == nullptr) continue;
 			const auto [entry, inserted] = bitcasts.try_emplace(source, &inst);
-			if (!inserted) Replace(inst, Value(entry->second));
-		}
-	}
-	// Identical selects are common in lowered shader bodies. Reuse the earlier result
-	// within the block so the SPIR-V emitter does not repeat the same OpSelect.
-	struct SelectKey {
-		ValueOpcode opcode;
-		std::array<Value, 3> args;
-
-		bool operator==(const SelectKey&) const = default;
-	};
-	struct SelectKeyHash {
-		static size_t HashValue(Value value) {
-			auto hash = std::hash<uint64_t> {}(static_cast<uint64_t>(value.GetType()));
-			uint64_t bits = 0;
-			if (const auto* instruction = value.TryInstruction(); instruction != nullptr) {
-				bits = reinterpret_cast<uintptr_t>(instruction);
-			} else switch (value.GetType()) {
-				case Type::Opaque: break;
-				case Type::U1: bits = value.U1(); break;
-				case Type::U8: bits = value.U8(); break;
-				case Type::U16: bits = value.U16(); break;
-				case Type::F16: bits = value.F16Bits(); break;
-				case Type::U32: bits = value.U32(); break;
-				case Type::F32: bits = std::bit_cast<uint32_t>(value.F32Value()); break;
-				case Type::U64: bits = value.U64(); break;
-				default: break;
-			}
-			hash ^= std::hash<uint64_t> {}(bits) + 0x9e3779b9u + (hash << 6u) + (hash >> 2u);
-			return hash;
-		}
-
-		size_t operator()(const SelectKey& key) const {
-			auto hash = std::hash<uint16_t> {}(static_cast<uint16_t>(key.opcode));
-			for (const auto arg: key.args) {
-				hash ^= HashValue(arg) + 0x9e3779b9u + (hash << 6u) + (hash >> 2u);
-			}
-			return hash;
-		}
-	};
-	for (auto* block: blocks) {
-		std::unordered_map<SelectKey, Inst*, SelectKeyHash> selects;
-		for (auto& inst: *block) {
-			const auto opcode = inst.GetOpcode();
-			if (opcode != ValueOpcode::SelectU1 && opcode != ValueOpcode::SelectU32 &&
-			    opcode != ValueOpcode::SelectF32) continue;
-			const SelectKey key {opcode, {Arg(inst, 0), Arg(inst, 1), Arg(inst, 2)}};
-			const auto [entry, inserted] = selects.try_emplace(key, &inst);
 			if (!inserted) Replace(inst, Value(entry->second));
 		}
 	}
