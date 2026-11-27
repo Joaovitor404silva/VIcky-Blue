@@ -291,6 +291,9 @@ private:
 	std::vector<vk::Pipeline>                      m_replaced_pipelines;
 	// Records everything first created if a shader store is open, and writes the driver cache.
 	ShaderStoreWriter m_store;
+	// Each module's inputs, which outlive the store's recompiler build: a stale store is rebuilt
+	// from them at start-up (pipelineSerialization.cpp).
+	ShaderStoreWriter m_recipes;
 
 	template <typename InputInfo>
 	const ShaderModule* GetProgram(const ShaderParams& params, InputInfo& input_info,
@@ -300,7 +303,20 @@ private:
 	ShaderModule& CompileModule(Program& program, const ProgramKey& key,
 	                            ShaderRecompiler::CompileOptions       options,
 	                            ShaderRecompiler::TranslateResult      translated,
-	                            ShaderRecompiler::IR::PushData::Window push_data);
+	                            ShaderRecompiler::IR::PushData::Window push_data,
+	                            std::span<const uint32_t>              code);
+	struct BuiltModule {
+		ShaderModule          module;
+		std::vector<uint32_t> spirv;
+	};
+	// Compiles a translated program into a module without touching the cache, so start-up can
+	// rebuild modules on several threads.
+	static BuiltModule BuildModule(const GraphicContext& graphics, const ProgramKey& key,
+	                               ShaderRecompiler::CompileOptions                    options,
+	                               ShaderRecompiler::TranslateResult                   translated,
+	                               const ShaderRecompiler::IR::ResourceSpecialization& specialization,
+	                               std::span<const uint32_t>                           function_code,
+	                               ShaderRecompiler::IR::PushData::Window              push_data);
 	// Puts finished optimized builds in place of their unoptimized pipelines.
 	[[nodiscard]] PipelineBuild FirstBuild() const;
 	void PromoteOptimized();
@@ -317,8 +333,18 @@ private:
 	bool LoadRecord(std::span<const uint8_t>& records);
 	void StoreModule(const ProgramKey& key, const Program& program, const ShaderModule& module,
 	                 const std::vector<uint32_t>& spirv);
-	void StorePipeline(const GraphicsPipelineKey& key);
-	void StoreLayout(uint64_t key, const ShaderTessellationInputInfo& layout);
+	// Also into the recipes, unless they come from there.
+	void StorePipeline(const GraphicsPipelineKey& key, bool recipe = true);
+	void StoreLayout(uint64_t key, const ShaderTessellationInputInfo& layout, bool recipe = true);
+	void StoreRecipe(const ProgramKey& key, const Program& program, const ShaderModule& module,
+	                 const ShaderRecompiler::CompileOptions& options, std::span<const uint32_t> code,
+	                 ShaderRecompiler::IR::PushData::Window push_data);
+	// Opens the recipes next to the store at `path`, keeping their complete records. Returns the
+	// records if `load`, or none when they are of another format.
+	std::vector<std::vector<uint8_t>> OpenRecipes(const std::filesystem::path& path, bool load);
+	// Compiles every module the recipes describe into the program cache and the store, and loads
+	// their pipeline keys and tessellation layouts.
+	void RebuildFromRecipes(std::span<const std::vector<uint8_t>> recipes);
 	// Every module by id, with id 0 naming an absent stage.
 	[[nodiscard]] ModuleMap MapModules() const;
 	// False when a stage id of the key is not in `modules`.

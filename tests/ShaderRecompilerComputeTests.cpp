@@ -51772,8 +51772,8 @@ void CheckShaderStore(VulkanHarness &vulkan) {
     session.pipelines = PipelineCacheTestAccess::Pipelines(pipelines);
     return session;
   };
-  const auto flip = [&](uint64_t offset) {
-    Common::File file(store, Common::File::Mode::ReadWrite);
+  const auto flip_file = [](const std::filesystem::path &path, uint64_t offset) {
+    Common::File file(path, Common::File::Mode::ReadWrite);
     uint8_t byte = 0;
     file.Seek(offset);
     file.Read(&byte, 1);
@@ -51781,6 +51781,7 @@ void CheckShaderStore(VulkanHarness &vulkan) {
     file.Seek(offset);
     file.Write(&byte, 1);
   };
+  const auto flip = [&](uint64_t offset) { flip_file(store, offset); };
 
   const auto cold = run();
   const auto size = std::filesystem::file_size(store);
@@ -51812,6 +51813,25 @@ void CheckShaderStore(VulkanHarness &vulkan) {
   Require(name, "damaged record",
           run() == lost_pipeline && std::filesystem::file_size(store) == size,
           "a damaged record was loaded or not replaced");
+  // A store from another recompiler build is rebuilt at start-up from the recipes, which keep
+  // each module's inputs across builds: the run compiles nothing and finds its pipelines made.
+  const auto recipes = std::filesystem::path(store).replace_extension(".recipes");
+  Require(name, "recipes", std::filesystem::exists(recipes) && std::filesystem::file_size(recipes) > 0,
+          "compiled modules left no recipes");
+  const auto recipes_size = std::filesystem::file_size(recipes);
+  flip(0);
+  Require(name, "rebuilt store",
+          run() == warm && std::filesystem::file_size(store) == size &&
+              std::filesystem::file_size(recipes) == recipes_size,
+          "a stale store was not rebuilt from the recipes before the run, or the recipes grew");
+  Require(name, "rebuilt store reused", run() == warm && std::filesystem::file_size(store) == size,
+          "the rebuilt store was not reused by the next start");
+  // Recipes from another recipe format are dropped; without them a stale store starts over.
+  flip_file(recipes, 0);
+  flip(0);
+  Require(name, "stale recipes", run() == cold && std::filesystem::file_size(store) == size,
+          "recipes of another format rebuilt a store");
+  std::filesystem::remove(recipes);
   flip(0);
   Require(name, "stale store", run() == cold && std::filesystem::file_size(store) == size,
           "a store with another header was reused instead of started over");

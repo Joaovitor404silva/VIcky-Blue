@@ -257,37 +257,59 @@ ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::Srt
 	return nullptr;
 }
 
-ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& key,
-                                           ShaderRecompiler::CompileOptions       options,
-                                           ShaderRecompiler::TranslateResult      translated,
-                                           ShaderRecompiler::IR::PushData::Window push_data) {
-	Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::ShadersCompiled,
-	                                         Common::DebugCounters::Counter::ShaderCompileNs,
-	                                         Common::DebugCounters::Peak::ShaderCompileNs);
-	const auto profile = SpirvProfile(m_graphics);
+PipelineCache::BuiltModule PipelineCache::BuildModule(
+    const GraphicContext& graphics, const ProgramKey& key, ShaderRecompiler::CompileOptions options,
+    ShaderRecompiler::TranslateResult translated,
+    const ShaderRecompiler::IR::ResourceSpecialization& specialization,
+    std::span<const uint32_t> function_code, ShaderRecompiler::IR::PushData::Window push_data) {
+	const auto profile = SpirvProfile(graphics);
 	options.profile    = &profile;
-	auto result = ShaderRecompiler::CompileProgram(std::move(translated), options,
-	                                               program.specialization, push_data);
+	auto result = ShaderRecompiler::CompileProgram(std::move(translated), options, specialization,
+	                                               push_data);
 	auto info = std::move(result.program).TakeCompiledInfo();
 
 	// The same inputs give the same module id across runs.
-	const auto function_code = program.FunctionCode();
 	ShaderRecompiler::IR::Writer inputs;
 	ShaderRecompiler::IR::IoAll(inputs, key.stage, key.hash, key.user_data_count, key.static_state,
-	                            info.bindings.push_data_start_dword, program.specialization);
+	                            info.bindings.push_data_start_dword, specialization);
 	inputs.Raw(function_code.data(), function_code.size_bytes()); // Last, so it needs no size.
 	const auto id = XXH3_64bits(inputs.bytes.data(), inputs.bytes.size());
 
-	const auto* stage = ShaderRecompiler::StageName(key.stage);
-	DumpShader(result.spirv, fmt::format("{}_{:016x}_{:016x}.spv", stage, key.hash, id));
-	ValidateShaderSpirv(stage, key.hash, result.spirv, profile.maintenance8);
-	auto& module = program.modules.emplace_back(ShaderModule {
-	    .id             = id,
-	    .module         = CompileSPV(result.spirv, m_graphics.device),
-	    .info           = std::move(info),
-	    .specialization = program.specialization,
-	    .function_code  = {function_code.begin(), function_code.end()},
-	});
+	ValidateShaderSpirv(ShaderRecompiler::StageName(key.stage), key.hash, result.spirv,
+	                    profile.maintenance8);
+	BuiltModule built {
+	    .module = {
+	        .id             = id,
+	        .module         = CompileSPV(result.spirv, graphics.device),
+	        .info           = std::move(info),
+	        .specialization = specialization,
+	        .function_code  = {function_code.begin(), function_code.end()},
+	    },
+	    .spirv = std::move(result.spirv),
+	};
+	// The inputs of these come from the stage's static key.
+	if (key.stage == ShaderType::Pixel &&
+	    options.input_info.pixel->parameter_mode == ShaderPixelParameterMode::Rectangle) {
+		built.module.rect_parameters = RectListParameters(*options.input_info.pixel, built.module.info);
+	} else if (key.stage == ShaderType::Mesh) {
+		built.module.mesh_task = options.input_info.vertex->indirect_draw;
+	}
+	return built;
+}
+
+ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& key,
+                                           ShaderRecompiler::CompileOptions       options,
+                                           ShaderRecompiler::TranslateResult      translated,
+                                           ShaderRecompiler::IR::PushData::Window push_data,
+                                           std::span<const uint32_t>              code) {
+	Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::ShadersCompiled,
+	                                         Common::DebugCounters::Counter::ShaderCompileNs,
+	                                         Common::DebugCounters::Peak::ShaderCompileNs);
+	auto built = BuildModule(m_graphics, key, options, std::move(translated), program.specialization,
+	                         program.FunctionCode(), push_data);
+	DumpShader(built.spirv, fmt::format("{}_{:016x}_{:016x}.spv", ShaderRecompiler::StageName(key.stage),
+	                                    key.hash, built.module.id));
+	auto& module = program.modules.emplace_back(std::move(built.module));
 	m_compiled[static_cast<size_t>(key.stage)]++;
 	// Guest geometry shaders are compiled through the host mesh stage.
 	std::printf("Shaders: VS %u | PS %u | CS %u | GS %u | LS %u | HS %u | TES %u\n",
@@ -298,16 +320,10 @@ ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& k
 	            m_compiled[static_cast<size_t>(ShaderType::Local)],
 	            m_compiled[static_cast<size_t>(ShaderType::TessellationControl)],
 	            m_compiled[static_cast<size_t>(ShaderType::TessellationEvaluation)]);
-	// The inputs of these come from the stage's static key.
-	if (key.stage == ShaderType::Pixel &&
-	    options.input_info.pixel->parameter_mode == ShaderPixelParameterMode::Rectangle) {
-		module.rect_parameters = RectListParameters(*options.input_info.pixel, module.info);
-	} else if (key.stage == ShaderType::Mesh) {
-		module.mesh_task = options.input_info.vertex->indirect_draw;
-	}
 	// Programs with GPU-selected calls depend on their callees' current code.
 	if (program.call_source == nullptr) {
-		StoreModule(key, program, module, result.spirv);
+		StoreModule(key, program, module, built.spirv);
+		StoreRecipe(key, program, module, options, code, push_data);
 	}
 	return module;
 }
@@ -504,7 +520,7 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 		if (module != nullptr) return bind(*module);
 	}
 	return bind(CompileModule(entry->second, entry->first, options, std::move(translated),
-	                          push_data));
+	                          push_data, params.code));
 }
 
 PipelineCache::PipelineCache(GraphicContext&                         graphics,
@@ -699,6 +715,7 @@ void PipelineCache::CheckpointDriverCache() {
 
 void PipelineCache::Save() {
 	m_store.Finish();
+	m_recipes.Finish();
 	if (m_driver_cache_dirty) {
 		m_driver_cache_dirty = false;
 		WriteDriverCache();
