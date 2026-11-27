@@ -1517,6 +1517,13 @@ vk::ImageView TextureCache::AcquireAtomicShadow(ImageId id, const ImageDesc& des
 	(void)FindTexture(id, raw_desc);
 	std::scoped_lock lock {m_lock};
 	auto&            image = m_slot_images[id];
+	// A subresource already filled since the last write-back holds the newest values: filling it
+	// again would only repeat the copy and, after a draw, lose that draw's atomics.
+	for (const auto& entry: m_active_atomic_shadows) {
+		if (entry.id == id && entry.bits == bits && entry.view_info == desc.view_info) {
+			return image.FindAtomicShadowView(desc.view_info);
+		}
+	}
 	image.EnsureAtomicShadow();
 	m_scheduler.EndRendering();
 	auto       command = m_scheduler.Current().Handle();
@@ -1557,13 +1564,14 @@ vk::ImageView TextureCache::AcquireAtomicShadow(ImageId id, const ImageDesc& des
 }
 
 void TextureCache::CommitAtomicShadows() {
+	// AcquireAtomicShadow appends under m_lock, so the list is read and swapped under it too.
+	std::scoped_lock lock {m_lock};
 	if (m_active_atomic_shadows.empty()) {
 		return;
 	}
 	const auto active = std::exchange(m_active_atomic_shadows, {});
 	m_scheduler.EndRendering();
-	std::scoped_lock lock {m_lock};
-	auto             command = m_scheduler.Current().Handle();
+	auto command = m_scheduler.Current().Handle();
 	for (const auto& entry: active) {
 		auto* image = m_slot_images.try_get(entry.id);
 		if (image == nullptr || !image->registered || image->atomic_shadow.image == nullptr) {
