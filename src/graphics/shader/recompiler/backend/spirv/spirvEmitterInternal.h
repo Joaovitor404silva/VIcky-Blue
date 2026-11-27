@@ -116,6 +116,8 @@ struct EmitterState {
 	std::array<BufferDefinition, 4>                  storage_buffers {};
 	std::vector<uint32_t>                           memory_byte_offsets;
 	std::vector<uint32_t>                           memory_byte_sizes;
+	// While a runtime-layout candidate access is emitted, the id of its runtime stride.
+	uint32_t                                        buffer_runtime_stride = 0;
 	uint32_t                                         bda_pagetable_variable  = 0;
 	uint32_t                                         fault_buffer_variable   = 0;
 	uint32_t                                         bda_pointer_function    = 0;
@@ -406,6 +408,26 @@ Prospero::BufferFormat StorageBufferFormat(const EmitterState& state, const IR::
 
 uint32_t SharedIndirectBufferResource(const EmitterState& state, uint32_t resource);
 
+// Candidates of a GPU-selected buffer that differ in layout, grouped so that each access is
+// emitted once per group: the selected ordinal picks its group at run time, and its descriptor
+// slot follows from the ordinal because the children's slots are consecutive.
+struct IndirectBufferGroups {
+	std::vector<uint32_t> representatives; // one candidate resource per group
+	std::vector<uint32_t> group_of;        // group of each candidate ordinal
+	uint32_t              root_slot  = 0;  // descriptor slot of ordinal 0
+	uint32_t              child_slot = 0;  // descriptor slot of ordinal 1
+};
+// Empty when the candidates cannot share a group switch.
+IndirectBufferGroups GroupIndirectBufferCandidates(const EmitterState& state, uint32_t resource);
+
+// Membership bit masks that pick a group from a candidate ordinal: the largest group is the
+// default and needs none, and only non-zero 32-bit words are kept, as (word index, mask).
+struct IndirectGroupMasks {
+	uint32_t                                                default_group = 0;
+	std::vector<std::vector<std::pair<uint32_t, uint32_t>>> words;
+};
+IndirectGroupMasks SparseIndirectGroupMasks(const std::vector<uint32_t>& group_of, uint32_t group_count);
+
 void EmitMemoryBindings(EmitterState& state);
 
 uint32_t LdsDwordCount(const EmitterState& state);
@@ -424,6 +446,9 @@ struct MemoryResourceAccess {
 
 uint32_t EmitIndirectResourceIndex(EmitterState& state, uint32_t key, uint32_t mapping_offset,
                                    uint32_t search_iterations, uint32_t default_resource);
+// Runtime layout word of a candidate ordinal of a runtime-layout buffer table: its layout class
+// in the low half and its stride in the high half. Out-of-range ordinals read ordinal 0.
+uint32_t EmitRuntimeBufferLayout(EmitterState& state, const IR::BufferResource& root, uint32_t selected);
 // Slot word of an image heap byte offset; offsets past the heap select the null element.
 uint32_t EmitImageHeapEntry(EmitterState& state, uint32_t key, uint32_t mapping_offset);
 MemoryResourceAccess PrepareMemoryResourceAccess(EmitterState& state, const IR::MemoryInfo& mem,

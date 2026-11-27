@@ -13,10 +13,25 @@
 #include <cstdio>
 #include <fmt/format.h>
 #include <functional>
+#include <mutex>
 #include <numeric>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
+
+namespace {
+uint32_t g_runtime_layout_min_candidates = 256u;
+} // namespace
+
+uint32_t RuntimeLayoutMinCandidates() {
+	return g_runtime_layout_min_candidates;
+}
+
+void SetRuntimeLayoutMinCandidatesForTests(uint32_t candidates) {
+	g_runtime_layout_min_candidates = candidates;
+}
+
 namespace {
 
 constexpr uint64_t AddressMask            = 0x0000ffffffffffffull;
@@ -219,6 +234,24 @@ bool ReadScalarTable(uint64_t base, uint64_t size, uint64_t offset,
 	return ReadTable(base & AddressMask & ~uint64_t {3}, size, offset & ~uint64_t {3}, runtime, words);
 }
 
+// A real stride-0 V# that fails the swizzle, ADD_TID or bounds rules would also read as null below,
+// so each distinct row that does is logged once (at most MaxLogged of them).
+void LogNulledDataRow(const DescriptorValue& value) {
+	constexpr size_t                    MaxLogged = 32;
+	static std::mutex                   mutex;
+	static std::unordered_set<uint64_t> logged;
+	uint64_t key = 0xcbf29ce484222325ull;
+	for (uint32_t i = 0; i < 4u; ++i) key = (key ^ value.dwords[i]) * 0x100000001b3ull;
+	{
+		std::scoped_lock lock {mutex};
+		if (logged.size() >= MaxLogged || !logged.insert(key).second) return;
+	}
+	std::fprintf(stderr,
+	             "shader resource specialization: read-only buffer table row %08x,%08x,%08x,%08x has "
+	             "stride 0 and fails the V# rules; read as a null buffer\n",
+	             value.dwords[0], value.dwords[1], value.dwords[2], value.dwords[3]);
+}
+
 bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferResource& resource) {
 	ShaderBufferResource descriptor;
 	if (!DecodeBufferDescriptor(value, descriptor)) return false;
@@ -236,6 +269,14 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 	    (!resource.formatted || Format::GetFormatInfo(descriptor.Format()).byte_size == 1u);
 	if (descriptor.SwizzleEnabled() || descriptor.AddTid() ||
 	    (descriptor.OutOfBounds() != (indexed ? 0u : 3u) && !byte_indexed)) {
+		// A row a read-only table can reach may hold plain data rather than a V#: the target title
+		// keeps floats next to its descriptors. Such a row has no stride, which no indexed record
+		// buffer has, so it reads as a null buffer; one with a stride is a real V# and still fails.
+		if (!resource.written && indexed && descriptor.Stride() == 0u) {
+			LogNulledDataRow(value);
+			value.dwords.fill(0u);
+			return true;
+		}
 		return SpecializationFail(fmt::format(
 		    "indirect buffers require exact linear index or byte bounds: "
 		    "descriptor={:08x},{:08x},{:08x},{:08x} swizzle={} add_tid={} oob={} "
@@ -251,25 +292,42 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 		if (!formatted_read) {
 			const bool scalar = resource.max_byte_extent == 4u &&
 			    (descriptor.Format() == Prospero::BufferFormat::k32UInt ||
+			     descriptor.Format() == Prospero::BufferFormat::k32Float ||
+			     descriptor.Format() == Prospero::BufferFormat::k32SInt ||
+			     descriptor.Format() == Prospero::BufferFormat::k16Float ||
+			     descriptor.Format() == Prospero::BufferFormat::k8UNorm ||
 			     descriptor.Format() == Prospero::BufferFormat::k8SInt ||
 			     descriptor.Format() == Prospero::BufferFormat::k8UInt ||
 			     descriptor.Format() == Prospero::BufferFormat::k16SInt ||
 			     descriptor.Format() == Prospero::BufferFormat::k16UInt);
-			const bool rgba16 = resource.max_byte_extent == 16u &&
-			    descriptor.Format() == Prospero::BufferFormat::k16_16_16_16Float;
+			// A four-component store fills the record; a one-component store converts x and
+			// zero-fills the rest.
+			// The unsigned variant is proved for one-component stores, which truncate x.
+			const bool rgba16 = ((resource.max_byte_extent == 16u || resource.max_byte_extent == 4u) &&
+			                     descriptor.Format() == Prospero::BufferFormat::k16_16_16_16Float) ||
+			                    (resource.max_byte_extent == 4u &&
+			                     descriptor.Format() == Prospero::BufferFormat::k16_16_16_16UInt);
 			// A dword store to a four-component float record zero-fills the other channels.
 			const bool rgba32 = resource.max_byte_extent == 4u &&
 			    descriptor.Format() == Prospero::BufferFormat::k32_32_32_32Float;
-			// A one-component format's missing channels default to 0,0,0 or 0,0,1, both identity.
+			// A store to a two-halfword unsigned record zero-fills y.
+			// The same holds for a two-byte unsigned record, which truncates x to 8 bits.
+			const bool rg16 = resource.max_byte_extent == 4u &&
+			    (descriptor.Format() == Prospero::BufferFormat::k16_16UInt ||
+			     descriptor.Format() == Prospero::BufferFormat::k8_8UInt ||
+			     descriptor.Format() == Prospero::BufferFormat::k32_32UInt);
+			// A one-component format's missing channels default to 0,0,0 or 0,0,1, both identity,
+			// and a two-component format's to 0,1.
 			const auto selects = descriptor.DstSelXYZW();
 			const bool identity = rgba16 || rgba32 ? selects == DstSel(4, 5, 6, 7)
+			                      : rg16           ? selects == DstSel(4, 5, 0, 1)
 			                             : selects == DstSel(4, 0, 0, 0) || selects == DstSel(4, 0, 0, 1);
 			// Byte and halfword stores may sit in wider records; the alignment rules below cover
 			// them. Wider formats stay tight.
 			const bool tight_enough = descriptor.Stride() == format.byte_size || byte_indexed ||
 			    (scalar && format.byte_size < 4u && descriptor.Stride() > format.byte_size);
-			if ((!scalar && !rgba16 && !rgba32) || !tight_enough || !identity)
-				return SpecializationFail(fmt::format("indirect formatted stores require an identity 8- or 16-bit integer, UInt32, RGBA16Float or RGBA32Float "
+			if ((!scalar && !rgba16 && !rgba32 && !rg16) || !tight_enough || !identity)
+				return SpecializationFail(fmt::format("indirect formatted stores require an identity 8- or 16-bit integer, UNorm8, Float16, UInt32, SInt32, Float32, RG8UInt, RG16UInt, RG32UInt, RGBA16Float, RGBA16UInt or RGBA32Float "
 				    "records: descriptor={:08x},{:08x},{:08x},{:08x} stride={} format={} max_extent={}",
 				    value.dwords[0], value.dwords[1], value.dwords[2], value.dwords[3],
 				    descriptor.Stride(), static_cast<uint32_t>(descriptor.Format()), resource.max_byte_extent));
@@ -290,6 +348,12 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 	           (indexed && resource.max_byte_extent != 1u &&
 	            (descriptor.Stride() < resource.max_byte_extent || (descriptor.Stride() & 3u) != 0u))) {
 		return SpecializationFail("indirect buffer stores require byte addressing or aligned records covering the write");
+	} else if (indexed && descriptor.Stride() == 0u) {
+		// The emitter and the runtime-layout classes read a stride-0 candidate as a null buffer
+		// (ResourceSpecialization::BufferLayoutClass::empty), so a mapped one cannot be addressed.
+		return SpecializationFail(fmt::format(
+		    "indirect indexed buffers require a non-zero stride: descriptor={:08x},{:08x},{:08x},{:08x}",
+		    value.dwords[0], value.dwords[1], value.dwords[2], value.dwords[3]));
 	}
 	return true;
 }
@@ -596,17 +660,27 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 	auto& byte_offsets = program.material_keys;
 	const auto children_begin = descriptors.size();
 	const auto root_resource = specializations[resource_index];
+	// Tables reach tens of thousands of distinct descriptors and are materialized per dispatch,
+	// so candidates are interned through a hash map instead of a linear search.
+	struct CandidateHash {
+		size_t operator()(const DescriptorValue& value) const {
+			uint64_t hash = 0xcbf29ce484222325ull ^ value.dword_count;
+			for (const auto dword: value.dwords) hash = (hash ^ dword) * 0x100000001b3ull;
+			return static_cast<size_t>(hash ^ (hash >> 32u));
+		}
+	};
+	std::unordered_map<DescriptorValue, uint32_t, CandidateHash> interned;
 	const auto intern_candidate = [&](const DescriptorValue& candidate) {
 		if (candidate == descriptors[resource_index]) return 0u;
-		const auto found = std::find(descriptors.begin() + children_begin, descriptors.end(), candidate);
-		const auto ordinal = static_cast<uint32_t>(found - descriptors.begin() - children_begin + 1u);
-		if (found == descriptors.end()) {
+		const auto ordinal = static_cast<uint32_t>(descriptors.size() - children_begin + 1u);
+		const auto [found, inserted] = interned.try_emplace(candidate, ordinal);
+		if (inserted) {
 			descriptors.push_back(candidate);
 			auto child = root_resource;
 			child.indirect_root = resource_index;
 			specializations.push_back(child);
 		}
-		return ordinal;
+		return found->second;
 	};
 	uint64_t table_base = 0;
 	uint64_t table_size = UINT64_MAX; // Scalar addresses have no buffer descriptor bounds.
@@ -827,6 +901,24 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 				root.indirect_root = resource_index;
 				root.indirect_mapping_offset = static_cast<uint32_t>(mapping_offset);
 				root.indirect_search_iterations = 0u;
+				if constexpr (std::is_same_v<Specialization, ResourceSpecialization::Buffer>) {
+					// A large table keeps its candidates' layouts in runtime words after the
+					// mapping, one per ordinal (MaterializeResources fills them), and pads its
+					// candidates to a power of two, so its rows do not specialize the module.
+					const auto children = static_cast<uint32_t>(descriptors.size() - children_begin);
+					if (pointer == nullptr && !program.info.buffers[resource_index].atomic &&
+					    children >= RuntimeLayoutMinCandidates()) {
+						root.runtime_layout = true;
+						auto child = root_resource;
+						child.indirect_root = resource_index;
+						for (auto padded = std::bit_ceil(children); padded > children; --padded) {
+							descriptors.push_back({.dword_count = dword_count});
+							specializations.push_back(child);
+						}
+						snapshot.flattened_srt.resize(
+						    snapshot.flattened_srt.size() + descriptors.size() - children_begin + 1u, 0u);
+					}
+				}
 			}
 			return true;
 		}
@@ -916,6 +1008,21 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 		root.indirect_root              = resource_index;
 		root.indirect_mapping_offset = static_cast<uint32_t>(mapping_offset);
 		root.indirect_search_iterations = std::bit_width(key_count);
+		if constexpr (std::is_same_v<Specialization, ResourceSpecialization::Buffer>) {
+			// As for plain tables; the runtime words follow the key/ordinal pairs.
+			const auto children = static_cast<uint32_t>(descriptors.size() - children_begin);
+			if (!program.info.buffers[resource_index].atomic && children >= RuntimeLayoutMinCandidates()) {
+				root.runtime_layout = true;
+				auto child = root_resource;
+				child.indirect_root = resource_index;
+				for (auto padded = std::bit_ceil(children); padded > children; --padded) {
+					descriptors.push_back({.dword_count = dword_count});
+					specializations.push_back(child);
+				}
+				snapshot.flattened_srt.resize(
+				    snapshot.flattened_srt.size() + descriptors.size() - children_begin + 1u, 0u);
+			}
+		}
 	}
 	return true;
 }
@@ -1728,8 +1835,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 					        program, base.source, i, 4u, 4u, observed, snapshot,
 					        snapshot.buffers, specialization.buffers,
 					        [&](DescriptorValue& value) {
-						        return NormalizeIndirectBuffer(
-						            value, source->indirect_descriptor->indexed, base);
+						        return NormalizeIndirectBuffer(value, source->indirect_descriptor->indexed, base);
 					        }))
 						return resource_failed("buffer", i, base.source, snapshot.buffers.size());
 				}
@@ -1761,6 +1867,50 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		buffer.descriptor_swizzle = base.formatted ? descriptor.DstSelXYZW() : DstSel(4, 5, 6, 7);
 		buffer.zero_stride_oob    = descriptor.OutOfBounds() == 0u && stride == 0u;
 		buffer.scalar_empty       = base.scalar && descriptor.GetSize() == 0u;
+	}
+	// Runtime-layout tables: each ordinal's word is its layout class among its root's classes,
+	// with the stride in the high half; the candidates' own entries become canonical.
+	{
+		auto previous = std::move(specialization.buffer_layout_classes);
+		specialization.buffer_layout_classes.clear();
+		const auto original = static_cast<uint32_t>(program.info.buffers.size());
+		for (uint32_t root = 0; root < original; ++root) {
+			if (!specialization.buffers[root].runtime_layout) continue;
+			std::vector<uint32_t> ordinals {root};
+			for (uint32_t i = original; i < specialization.buffers.size(); ++i)
+				if (specialization.buffers[i].indirect_root == root) ordinals.push_back(i);
+			const auto class_of = [&](const ResourceSpecialization::Buffer& buffer) {
+				return ResourceSpecialization::BufferLayoutClass {
+				    .root = root, .format = buffer.descriptor_format, .swizzle = buffer.descriptor_swizzle,
+				    .empty = (buffer.packed_stride & 0x3fffu) == 0u};
+			};
+			std::vector<ResourceSpecialization::BufferLayoutClass> classes;
+			for (const auto& known: previous)
+				if (known.root == root) classes.push_back(known);
+			for (const auto i: ordinals) classes.push_back(class_of(specialization.buffers[i]));
+			std::ranges::sort(classes);
+			classes.erase(std::unique(classes.begin(), classes.end()), classes.end());
+			const auto mapping = specialization.buffers[root].indirect_mapping_offset;
+			const auto pairs = specialization.buffers[root].indirect_search_iterations != 0u;
+			const auto words = mapping + 1u + snapshot.flattened_srt[mapping] * (pairs ? 2u : 1u);
+			if (words + ordinals.size() > snapshot.flattened_srt.size())
+				return SpecializationFail("runtime layout words are missing");
+			for (uint32_t ordinal = 0; ordinal < ordinals.size(); ++ordinal) {
+				auto& buffer = specialization.buffers[ordinals[ordinal]];
+				const auto found = std::ranges::lower_bound(classes, class_of(buffer));
+				snapshot.flattened_srt[words + ordinal] =
+				    static_cast<uint32_t>(found - classes.begin()) | ((buffer.packed_stride & 0x3fffu) << 16u);
+				const auto mapping_offset = buffer.indirect_mapping_offset;
+				const auto iterations     = buffer.indirect_search_iterations;
+				buffer = {.indirect_root = root, .runtime_layout = true};
+				if (ordinal == 0u) {
+					buffer.indirect_mapping_offset    = mapping_offset;
+					buffer.indirect_search_iterations = iterations;
+				}
+			}
+			specialization.buffer_layout_classes.insert(specialization.buffer_layout_classes.end(),
+			                                            classes.begin(), classes.end());
+		}
 	}
 	snapshot.images.resize(program.info.images.size());
 	specialization.images.resize(program.info.images.size());
@@ -1921,6 +2071,23 @@ void ApplyResourceSpecialization(Program& program, const ResourceSpecialization&
 			EXIT_IF(root >= buffers.size());
 			buffers[root].indirect_resources.push_back(index);
 		}
+	}
+	// A runtime-layout table's first candidates represent its layout classes.
+	for (uint32_t index = 0; index < original_buffer_count; ++index) {
+		auto& root = buffers[index];
+		root.runtime_layout_classes = 0;
+		if (!specialization.buffers[index].runtime_layout) continue;
+		for (const auto& layout: specialization.buffer_layout_classes) {
+			if (layout.root != index) continue;
+			const auto ordinal = root.runtime_layout_classes++;
+			EXIT_IF(ordinal + 1u >= root.indirect_resources.size());
+			auto& candidate              = buffers[root.indirect_resources[ordinal + 1u]];
+			candidate.descriptor_format  = layout.format;
+			candidate.descriptor_swizzle = layout.swizzle;
+			// The stride is a runtime word; any non-zero value marks a non-empty layout.
+			candidate.packed_stride      = layout.empty ? 0u : 4u;
+		}
+		EXIT_IF(root.runtime_layout_classes == 0u);
 	}
 	auto& images = program.info.images;
 	const auto original_image_count = images.size();
