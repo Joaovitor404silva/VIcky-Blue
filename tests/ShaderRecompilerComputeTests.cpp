@@ -53,6 +53,7 @@
 #include "graphics/shader/recompiler/Tessellation.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvBuilder.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
+#include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/DeadCodeElimination.h"
@@ -1511,6 +1512,28 @@ void ExpectFatal(const char *name, Function function) {
   std::printf("[host]    %-32s ok\n", name);
 }
 #endif
+
+// A GPU-selected table of tens of thousands of candidates in a few dozen layouts picks the
+// group of the selected ordinal from per-group bit masks. Emitting every mask word made each
+// access a compare chain over all words of all groups (six million SPIR-V words for one
+// shader); only the non-zero words of the groups other than the default may be emitted.
+void CheckSparseIndirectGroupMasks() {
+  namespace Emitter = Libs::Graphics::ShaderRecompiler::Spirv::Emitter;
+  std::vector<uint32_t> group_of(40000u, 0u);
+  for (uint32_t ordinal = 0; ordinal < group_of.size(); ++ordinal)
+    group_of[ordinal] = ordinal < 100u ? 1u : ordinal == 39999u ? 2u : 0u;
+  group_of[5] = 0u;
+  const auto masks = Emitter::SparseIndirectGroupMasks(group_of, 3u);
+  Require("SparseIndirectGroupMasks", "default group", masks.default_group == 0u,
+          "the largest group must need no mask");
+  Require("SparseIndirectGroupMasks", "group count", masks.words.size() == 3u, "one list per group");
+  Require("SparseIndirectGroupMasks", "default words", masks.words[0].empty(), "default group got words");
+  using Words = std::vector<std::pair<uint32_t, uint32_t>>;
+  Require("SparseIndirectGroupMasks", "group 1", masks.words[1] == Words{{0u, ~0u & ~(1u << 5u)},
+          {1u, ~0u}, {2u, ~0u}, {3u, 0xfu}}, "wrong or zero words for the first hundred ordinals");
+  Require("SparseIndirectGroupMasks", "group 2", masks.words[2] == Words{{39999u / 32u, 1u << (39999u % 32u)}},
+          "the last ordinal needs exactly one word");
+}
 
 void CheckLeastRecentlyUsedCacheOrdering() {
   Common::LeastRecentlyUsedCache<uint32_t, uint64_t> cache;
@@ -13493,6 +13516,46 @@ public:
             view.buffer == nullptr && view.offset == 0 && view.range == vk::WholeSize &&
                 bindings.shader_data[program.bindings.MemorySizeDword()] == 0,
             "an empty storage binding was not a zero-length null descriptor");
+    std::printf("[host]    %-32s ok\n", name);
+  }
+
+  // A descriptor the guest left pointing at unmapped memory faults only when the shader touches
+  // it, so binding one must not stop emulation; it binds as a null descriptor. The words match a
+  // table row the target title binds: base 0x500400000198, stride 12288, over 1 GiB of records.
+  void CheckUnmappedBufferDescriptor() {
+    constexpr const char *name = "UnmappedBufferDescriptor";
+    EnsureRuntimeContext();
+    RenderContext context(m_runtime_context);
+    auto &executor = context.GetRenderExecutor();
+    for (const bool written : {false, true}) {
+      for (const u32 records : {0x00100000u, 0xffffffffu}) {
+        ShaderModule module;
+        auto &program = module.info;
+        program.stage = ShaderType::Compute;
+        program.info.buffers.push_back({.packed_stride = 1, .written = written});
+        program.info.buffers[0].descriptor_index = 0;
+        program.bindings.descriptor_counts[0] = 1;
+        program.bindings.descriptor_mask = 1;
+        ShaderRecompiler::IR::ResourceSnapshot snapshot;
+        auto &value = snapshot.buffers.emplace_back();
+        value.dword_count = 4;
+        value.dwords[0] = 0x00000198u;
+        value.dwords[1] = 0x00005004u | (12288u << 16u);
+        value.dwords[2] = records;
+        ShaderStageRuntime runtime{&module, &snapshot};
+        PreparedBindings bindings;
+        executor.PrepareBindings(runtime, bindings);
+        std::array<PreparedBindings *, 1> stages{&bindings};
+        executor.FindBuffers(stages);
+        executor.RebindBuffers(bindings);
+        const auto &view = bindings.buffers[0];
+        Require(name, "null descriptor",
+                view.buffer == nullptr && view.offset == 0 && view.range == vk::WholeSize &&
+                    bindings.shader_data[program.bindings.MemorySizeDword()] == 0,
+                std::string("an unmapped descriptor was not bound as null: written=") +
+                    (written ? "1" : "0") + " records=" + std::to_string(records));
+      }
+    }
     std::printf("[host]    %-32s ok\n", name);
   }
 
@@ -45704,16 +45767,43 @@ void CheckGuardedWaterfallBufferRecords(VulkanHarness &vulkan) {
 }
 
 void CheckGpuSelectedFormattedRecordStore(VulkanHarness &vulkan) {
+  struct RestoreRuntimeLayoutThreshold {
+    ~RestoreRuntimeLayoutThreshold() {
+      Libs::Graphics::ShaderRecompiler::IR::SetRuntimeLayoutMinCandidatesForTests(256u);
+    }
+  } restore_threshold;
   constexpr u32 selectors = 128, table = 256, stride = 592, member = 448;
   const u32 alignment = vulkan.RuntimeContext().GetPhysicalDeviceProperties()
                             .limits.minStorageBufferOffsetAlignment;
   const u32 slot = (4096u + alignment - 1u) / alignment * alignment;
   // Modes: signed bytes, RGBA16 float records, unsigned halfwords, and unsigned halfwords in
   // records wider than the format.
-  for (const u32 mode : {0u, 1u, 2u, 3u, 4u, 5u})
+  for (const u32 mode : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 11u, 12u, 13u, 14u, 15u, 16u})
   for (const u32 wave : {32u, 64u}) {
+    // Mode 8 stores x to an RGBA16 unsigned record, which truncates x and zero-fills the rest.
+    const bool rgba16u = mode == 8u;
+    // Mode 7 stores x to an RGBA16 float record, which zero-fills y, z and w.
+    const bool rgba16x = mode == 7u;
+    // Mode 9 stores x to a two-byte unsigned record, which truncates x and zero-fills y.
+    const bool rg8 = mode == 9u;
+    // Mode 10 stores a dword to a one-float record, which keeps its bits.
+    // Mode 11 does the same to a signed 32-bit record, with negative values.
+    const bool i32 = mode == 11u;
+    // Mode 15 mixes Float32 and UInt32 rows: the candidates differ only in format, so each
+    // access must be emitted once per format group, not once per candidate.
+    const bool mixed = mode == 15u || mode == 16u;
+    // Mode 16 is mode 15 with the candidates' layouts in runtime words, as for the large
+    // tables whose rows change layout between dispatches.
+    const bool runtime_layout = mode == 16u;
+    Libs::Graphics::ShaderRecompiler::IR::SetRuntimeLayoutMinCandidatesForTests(runtime_layout ? 1u : 256u);
+    const bool f32 = mode == 10u || i32 || mixed;
+    // Modes 12 and 13 convert a dword store to a half or UNorm8 record; mode 14 stores x to a
+    // two-dword unsigned record, which zero-fills y.
+    const bool r16f = mode == 12u, unorm8 = mode == 13u, rg32 = mode == 14u;
     // Mode 5 stores one dword to a four-component float record, which zero-fills the rest.
     const bool rgba32 = mode == 5u;
+    // Mode 6 stores x to a two-halfword unsigned record, which zero-fills y.
+    const bool rg16 = mode == 6u;
     const bool wide = mode == 1u, half = mode == 2u || mode == 3u;
     const u32 half_stride = mode == 3u ? 12u : 2u;
     const u32 byte_stride = mode == 4u ? 12u : 1u;
@@ -45724,6 +45814,17 @@ void CheckGpuSelectedFormattedRecordStore(VulkanHarness &vulkan) {
                 : mode == 3u ? "GpuSelectedFormattedStridedUInt16Store"
                 : mode == 4u ? "GpuSelectedFormattedStridedRecordStore"
                 : rgba32 ? "GpuSelectedFormattedRgba32DwordStore"
+                : rg16 ? "GpuSelectedFormattedRg16UIntStore"
+                : rgba16x ? "GpuSelectedFormattedRgba16XStore"
+                : rgba16u ? "GpuSelectedFormattedRgba16UIntXStore"
+                : rg8 ? "GpuSelectedFormattedRg8UIntStore"
+                : i32 ? "GpuSelectedFormattedSInt32Store"
+                : runtime_layout ? "GpuSelectedRuntimeLayoutMixedStore"
+                : mixed ? "GpuSelectedFormattedMixedStore"
+                : r16f ? "GpuSelectedFormattedFloat16Store"
+                : unorm8 ? "GpuSelectedFormattedUNorm8Store"
+                : rg32 ? "GpuSelectedFormattedRg32UIntStore"
+                : f32 ? "GpuSelectedFormattedFloat32Store"
                 : half ? "GpuSelectedFormattedUInt16Store" : "GpuSelectedFormattedRecordStore";
     test.initial.assign((slot * 7u + keys.size() * wave * 4u) / 4u, 0xdeadbeefu);
     auto bytes = std::as_writable_bytes(std::span(test.initial));
@@ -45731,9 +45832,18 @@ void CheckGpuSelectedFormattedRecordStore(VulkanHarness &vulkan) {
     for (u32 row = 0; row < 6u; ++row) {
       if (wide && row != 0u && row != 3u) continue;
       const std::array descriptor{slot * (row + 1u),
-          (wide ? 8u : rgba32 ? 16u : half ? half_stride : byte_stride) << 16u, 20u,
-          wide ? (u32(Prospero::BufferFormat::k16_16_16_16Float) << 12u) | DstSel(4, 5, 6, 7)
+          (wide || rgba16x || rgba16u || rg32 ? 8u : r16f ? 2u : unorm8 ? 1u : rgba32 ? 16u : rg16 || f32 ? 4u : rg8 ? 2u : half ? half_stride : byte_stride) << 16u, 20u,
+          wide || rgba16x ? (u32(Prospero::BufferFormat::k16_16_16_16Float) << 12u) | DstSel(4, 5, 6, 7)
+          : rgba16u ? (u32(Prospero::BufferFormat::k16_16_16_16UInt) << 12u) | DstSel(4, 5, 6, 7)
           : rgba32 ? (u32(Prospero::BufferFormat::k32_32_32_32Float) << 12u) | DstSel(4, 5, 6, 7)
+          : rg16 ? (u32(Prospero::BufferFormat::k16_16UInt) << 12u) | DstSel(4, 5, 0, 1)
+          : rg8 ? (u32(Prospero::BufferFormat::k8_8UInt) << 12u) | DstSel(4, 5, 0, 1)
+          : r16f ? (u32(Prospero::BufferFormat::k16Float) << 12u) | DstSel(4, 0, 0, 1)
+          : unorm8 ? (u32(Prospero::BufferFormat::k8UNorm) << 12u) | DstSel(4, 0, 0, 1)
+          : rg32 ? (u32(Prospero::BufferFormat::k32_32UInt) << 12u) | DstSel(4, 5, 0, 1)
+          : f32 ? (u32(i32 ? Prospero::BufferFormat::k32SInt
+                       : mixed && (row & 1u) != 0u ? Prospero::BufferFormat::k32UInt
+                       : Prospero::BufferFormat::k32Float) << 12u) | DstSel(4, 0, 0, 1)
                : (u32(half ? Prospero::BufferFormat::k16UInt : Prospero::BufferFormat::k8SInt) << 12u) |
                      DstSel(4, 0, 0, 0)};
       std::copy(descriptor.begin(), descriptor.end(),
@@ -45749,6 +45859,37 @@ void CheckGpuSelectedFormattedRecordStore(VulkanHarness &vulkan) {
           test.initial[record + 1u] = 0xdead0001u;
           test.initial[record + 2u] = 0xdead0002u;
           test.initial[record + 3u] = 0xdead0003u;
+        } else if (rgba16u) {
+          // y, z and w must be zeroed by a store.
+          const auto record = slot * (row + 1u) / 4u + element * 2u;
+          test.initial[record] = 0xdead0000u | (0x2000u + row * 0x100u + element);
+          test.initial[record + 1u] = 0xdeadbeefu;
+        } else if (rgba16x) {
+          // x is an exact half; y, z and w must be zeroed by a store.
+          const auto record = slot * (row + 1u) / 4u + element * 2u;
+          test.initial[record] = 0xdead0000u | (0x3c00u + row * 0x40u + element);
+          test.initial[record + 1u] = 0xdeadbeefu;
+        } else if (r16f) {
+          const u32 value = 0x3c00u + row * 0x40u + element;
+          bytes[slot * (row + 1u) + element * 2u] = std::byte(value & 255u);
+          bytes[slot * (row + 1u) + element * 2u + 1u] = std::byte(value >> 8u);
+        } else if (unorm8) {
+          // 0 and 255 convert exactly.
+          bytes[slot * (row + 1u) + element] = std::byte(((row + element) & 1u) != 0u ? 0xffu : 0u);
+        } else if (rg32) {
+          // y must be zeroed by a store.
+          const auto record = slot * (row + 1u) / 4u + element * 2u;
+          test.initial[record] = 0x2000u + row * 0x100u + element;
+          test.initial[record + 1u] = 0xdead0001u;
+        } else if (f32) {
+          test.initial[slot * (row + 1u) / 4u + element] = 0x3f800000u + row * 0x100u + element;
+        } else if (rg8) {
+          // y must be zeroed by a store.
+          bytes[slot * (row + 1u) + element * 2u] = std::byte(row * 0x10u + element);
+          bytes[slot * (row + 1u) + element * 2u + 1u] = std::byte(0xa0u + element);
+        } else if (rg16) {
+          // y must be zeroed by a store.
+          test.initial[slot * (row + 1u) / 4u + element] = 0xdead0000u | (0x2000u + row * 0x100u + element);
         } else if (half) {
           const u32 value = 0x2000u + row * 0x100u + element;
           bytes[slot * (row + 1u) + element * half_stride] = std::byte(value & 255u);
@@ -45804,7 +45945,7 @@ void CheckGpuSelectedFormattedRecordStore(VulkanHarness &vulkan) {
     } else {
       code.push_back(EncodeVop2(0x1a, 10, InlineU32(5), 0));
       // Halfwords stay in range, so the check does not depend on how an overflow converts.
-      code.insert(code.end(), {EncodeVop2(0x25, 10, 255, 10), rgba32 ? 0x40000000u : half ? 0x100u : u32(-200)});
+      code.insert(code.end(), {EncodeVop2(0x25, 10, 255, 10), i32 ? 0xffff0000u : rgba32 || rgba16x || f32 || r16f || unorm8 ? 0x40000000u : rgba16u ? 0x12340100u : half || rg16 || rg8 || rg32 ? 0x100u : u32(-200)});
     }
     AppendSMovLiteral(&code, 126, 0x55555555u);
     AppendSMovLiteral(&code, 127, wave == 64u ? 0x55555555u : 0u);
@@ -45830,7 +45971,7 @@ void CheckGpuSelectedFormattedRecordStore(VulkanHarness &vulkan) {
         offset += words.size();
       }
       Require(test.name, "one shared store after the null candidate",
-              shared_stores == (wave > vulkan.SubgroupSize() ? 2u : 1u) * (rgba32 ? 4u : 1u),
+              shared_stores == (wave > vulkan.SubgroupSize() ? 2u : 1u) * (rgba32 || rgba16x || rgba16u ? 4u : rg16 || rg8 || rg32 || mixed ? 2u : 1u),
               "homogeneous children duplicated the native store per descriptor");
     }
     u32 bda_loads = 0, native_stores = 0;
@@ -45878,7 +46019,13 @@ void CheckGpuSelectedFormattedRecordStore(VulkanHarness &vulkan) {
         test.expected[slot * 7u / 4u + group * wave + lane] =
             valid && lane < 20u ? (wide ? 0x3f800000u
                                    : rgba32 ? 0x3f800000u + row * 0x100u + lane
-                                   : half ? 0x2000u + row * 0x100u + lane
+                                   : rgba16x ? 0x3f800000u + ((row * 0x40u + lane) << 13u)
+                                   : rg8 ? row * 0x10u + lane
+                                   : f32 ? 0x3f800000u + row * 0x100u + lane
+                                   : r16f ? 0x3f800000u + ((row * 0x40u + lane) << 13u)
+                                   : unorm8 ? (((row + lane) & 1u) != 0u ? 0x3f800000u : 0u)
+                                   : rg32 ? 0x2000u + row * 0x100u + lane
+                                   : half || rg16 || rgba16u ? 0x2000u + row * 0x100u + lane
                                           : u32(int32_t(0x80u + row + lane) - 256)) : 0u;
         if (valid && lane < (wide && row == 3u ? 18u : 20u) && (lane & 1u) == 0u) {
           if (wide) {
@@ -45888,6 +46035,35 @@ void CheckGpuSelectedFormattedRecordStore(VulkanHarness &vulkan) {
             const auto record = slot * (row + 1u) / 4u + lane * 4u;
             test.expected[record] = 0x40000000u + lane * 32u;
             test.expected[record + 1u] = test.expected[record + 2u] = test.expected[record + 3u] = 0u;
+          } else if (rgba16u) {
+            // The high bits of the stored dword are dropped.
+            const auto record = slot * (row + 1u) / 4u + lane * 2u;
+            test.expected[record] = (lane * 32u + 0x100u) & 0xffffu;
+            test.expected[record + 1u] = 0u;
+          } else if (rgba16x) {
+            // 2.0 plus mantissa bits below half precision rounds to exactly 2.0.
+            const auto record = slot * (row + 1u) / 4u + lane * 2u;
+            test.expected[record] = 0x4000u;
+            test.expected[record + 1u] = 0u;
+          } else if (r16f) {
+            // 2.0 plus mantissa bits below half precision rounds to exactly 2.0.
+            expected_bytes[slot * (row + 1u) + lane * 2u] = std::byte(0u);
+            expected_bytes[slot * (row + 1u) + lane * 2u + 1u] = std::byte(0x40u);
+          } else if (unorm8) {
+            // Values above 1.0 clamp to 255.
+            expected_bytes[slot * (row + 1u) + lane] = std::byte(0xffu);
+          } else if (rg32) {
+            const auto record = slot * (row + 1u) / 4u + lane * 2u;
+            test.expected[record] = lane * 32u + 0x100u;
+            test.expected[record + 1u] = 0u;
+          } else if (f32) {
+            test.expected[slot * (row + 1u) / 4u + lane] = (i32 ? 0xffff0000u : 0x40000000u) + lane * 32u;
+          } else if (rg8) {
+            // The high bits of the stored dword are dropped.
+            expected_bytes[slot * (row + 1u) + lane * 2u] = std::byte((lane * 32u) & 255u);
+            expected_bytes[slot * (row + 1u) + lane * 2u + 1u] = std::byte(0u);
+          } else if (rg16) {
+            test.expected[slot * (row + 1u) / 4u + lane] = lane * 32u + 0x100u;
           } else if (half) {
             const u32 value = lane * 32u + 0x100u;
             expected_bytes[slot * (row + 1u) + lane * half_stride] = std::byte(value & 255u);
@@ -58366,6 +58542,7 @@ int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   EnsureConfigInitialized();
   CheckLeastRecentlyUsedCacheOrdering();
+  CheckSparseIndirectGroupMasks();
   if (argc == 2 && std::strcmp(argv[1], "--mul-hi24-only") == 0) {
     VulkanHarness vulkan;
     RunCase(&vulkan, VectorMulHi24(32));
@@ -59075,6 +59252,7 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--robust-buffer-only") == 0) {
     VulkanHarness vulkan;
     vulkan.CheckNullStorageBufferDescriptor();
+    vulkan.CheckUnmappedBufferDescriptor();
     for (const u32 wave : {32u, 64u}) {
       for (const bool robust : {false, true}) RunCase(&vulkan, BufferTailAccesses(wave, robust));
     }
@@ -59810,6 +59988,7 @@ int main(int argc, char **argv) {
   vulkan.CheckOrderedDispatch();
   vulkan.CheckZeroStrideBufferBinding();
   vulkan.CheckNullStorageBufferDescriptor();
+  vulkan.CheckUnmappedBufferDescriptor();
   vulkan.CheckNullTextureDescriptors();
   vulkan.CheckBdaPageTableUploads();
   vulkan.CheckBdaSyncUploads();

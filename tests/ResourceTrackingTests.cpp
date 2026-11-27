@@ -9,6 +9,7 @@
 
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -6419,7 +6420,8 @@ void TestBoundedFormattedBufferStore() {
             snapshot.buffers[0].dwords[0] == memory.words[32],
         "destination address refresh was frozen or caused needless specialization");
   for (const auto [word, replacement] : std::array<std::pair<uint32_t, uint32_t>, 9>{
-           {{35u, static_cast<uint32_t>(Prospero::BufferFormat::k32Float) << 12u | 4u},
+           // Float32 and Float16 are proved by GPU-selected store cases; SNorm16 is not.
+           {{35u, static_cast<uint32_t>(Prospero::BufferFormat::k16SNorm) << 12u | 4u},
             {35u, static_cast<uint32_t>(Prospero::BufferFormat::k16UNorm) << 12u | 4u},
             {35u, memory.words[35] & ~7u}, {35u, memory.words[35] | (4u << 3u)},
             {32u, memory.words[32] + 1u},
@@ -6505,6 +6507,101 @@ void TestBoundedFormattedBufferStore() {
     Check(!materialize(), "an RGBA32 float store candidate accepted a stride it does not address");
     set_rgba32(16u, Libs::Graphics::DstSel(4, 0, 0, 0));
     Check(!materialize(), "an RGBA32 float store candidate accepted non-identity selects");
+    // A store to a two-halfword unsigned record zero-fills y; its identity selects are 4,5,0,1.
+    const auto set_rg16 = [&](uint32_t stride, uint32_t selects) {
+      set_byte_bounds(stride, 0u, Prospero::BufferFormat::k16_16UInt);
+      for (uint32_t key = 0; key < 8u; ++key) memory.words[32u + key * 4u + 3u] =
+          (static_cast<uint32_t>(Prospero::BufferFormat::k16_16UInt) << 12u) | selects;
+    };
+    set_rg16(4u, Libs::Graphics::DstSel(4, 5, 0, 1));
+    Check(materialize() && snapshot.buffers.size() == 8u,
+          "a store to a tight two-halfword unsigned record was refused");
+    set_rg16(8u, Libs::Graphics::DstSel(4, 5, 0, 1));
+    Check(!materialize(), "a two-halfword store candidate accepted a stride it does not address");
+    set_rg16(4u, Libs::Graphics::DstSel(4, 0, 0, 1));
+    Check(!materialize(), "a two-halfword store candidate accepted non-identity selects");
+    // A one-component store to an RGBA16 float record converts x and zero-fills the rest.
+    const auto set_rgba16 = [&](uint32_t stride, uint32_t selects) {
+      set_byte_bounds(stride, 0u, Prospero::BufferFormat::k16_16_16_16Float);
+      for (uint32_t key = 0; key < 8u; ++key) memory.words[32u + key * 4u + 3u] =
+          (static_cast<uint32_t>(Prospero::BufferFormat::k16_16_16_16Float) << 12u) | selects;
+    };
+    set_rgba16(8u, Libs::Graphics::DstSel(4, 5, 6, 7));
+    Check(materialize() && snapshot.buffers.size() == 8u,
+          "a one-component store to a tight RGBA16 float record was refused");
+    set_rgba16(16u, Libs::Graphics::DstSel(4, 5, 6, 7));
+    Check(!materialize(), "an RGBA16 float store candidate accepted a stride it does not address");
+    set_rgba16(8u, Libs::Graphics::DstSel(4, 5, 0, 1));
+    Check(!materialize(), "an RGBA16 float store candidate accepted non-identity selects");
+    // A dword store to a one-float record writes the float unchanged.
+    const auto set_f32 = [&](uint32_t stride, uint32_t selects) {
+      set_byte_bounds(stride, 0u, Prospero::BufferFormat::k32Float);
+      for (uint32_t key = 0; key < 8u; ++key) memory.words[32u + key * 4u + 3u] =
+          (static_cast<uint32_t>(Prospero::BufferFormat::k32Float) << 12u) | selects;
+    };
+    set_f32(4u, Libs::Graphics::DstSel(4, 0, 0, 1));
+    Check(materialize() && snapshot.buffers.size() == 8u,
+          "a store to a tight one-float record was refused");
+    set_f32(8u, Libs::Graphics::DstSel(4, 0, 0, 1));
+    Check(!materialize(), "a one-float store candidate accepted a stride it does not address");
+    set_f32(4u, Libs::Graphics::DstSel(4, 4, 0, 1));
+    Check(!materialize(), "a one-float store candidate accepted non-identity selects");
+    // Half and UNorm8 records convert a one-component store; a two-dword unsigned record keeps x
+    // and zero-fills y.
+    const auto set_format = [&](Prospero::BufferFormat format, uint32_t stride, uint32_t selects) {
+      set_byte_bounds(stride, 0u, format);
+      for (uint32_t key = 0; key < 8u; ++key) memory.words[32u + key * 4u + 3u] =
+          (static_cast<uint32_t>(format) << 12u) | selects;
+    };
+    for (const auto [format, stride, selects] : std::array<std::tuple<Prospero::BufferFormat, uint32_t, uint32_t>, 3>{{
+             {Prospero::BufferFormat::k16Float, 2u, Libs::Graphics::DstSel(4, 0, 0, 1)},
+             {Prospero::BufferFormat::k8UNorm, 1u, Libs::Graphics::DstSel(4, 0, 0, 1)},
+             {Prospero::BufferFormat::k32_32UInt, 8u, Libs::Graphics::DstSel(4, 5, 0, 1)}}}) {
+      set_format(format, stride, selects);
+      Check(materialize() && snapshot.buffers.size() == 8u,
+            "a store to a tight Float16, UNorm8 or two-dword unsigned record was refused");
+      if (stride == 8u) {
+        set_format(format, 16u, selects);
+        Check(!materialize(), "a two-dword store candidate accepted a stride it does not address");
+      }
+      set_format(format, stride, Libs::Graphics::DstSel(4, 4, 0, 1));
+      Check(!materialize(), "a Float16, UNorm8 or two-dword store candidate accepted non-identity selects");
+    }
+    // A dword store to a signed 32-bit record also keeps its bits.
+    set_byte_bounds(4u, 0u, Prospero::BufferFormat::k32SInt);
+    for (uint32_t key = 0; key < 8u; ++key) memory.words[32u + key * 4u + 3u] =
+        (static_cast<uint32_t>(Prospero::BufferFormat::k32SInt) << 12u) | Libs::Graphics::DstSel(4, 0, 0, 1);
+    Check(materialize() && snapshot.buffers.size() == 8u,
+          "a store to a tight signed 32-bit record was refused");
+    for (uint32_t key = 0; key < 8u; ++key) memory.words[32u + key * 4u + 3u] =
+        (static_cast<uint32_t>(Prospero::BufferFormat::k32SInt) << 12u) | Libs::Graphics::DstSel(4, 4, 0, 1);
+    Check(!materialize(), "a signed 32-bit store candidate accepted non-identity selects");
+    // A store to a two-byte unsigned record truncates x to 8 bits and zero-fills y.
+    const auto set_rg8 = [&](uint32_t stride, uint32_t selects) {
+      set_byte_bounds(stride, 0u, Prospero::BufferFormat::k8_8UInt);
+      for (uint32_t key = 0; key < 8u; ++key) memory.words[32u + key * 4u + 3u] =
+          (static_cast<uint32_t>(Prospero::BufferFormat::k8_8UInt) << 12u) | selects;
+    };
+    set_rg8(2u, Libs::Graphics::DstSel(4, 5, 0, 1));
+    Check(materialize() && snapshot.buffers.size() == 8u,
+          "a store to a tight two-byte unsigned record was refused");
+    set_rg8(4u, Libs::Graphics::DstSel(4, 5, 0, 1));
+    Check(!materialize(), "a two-byte store candidate accepted a stride it does not address");
+    set_rg8(2u, Libs::Graphics::DstSel(4, 0, 0, 1));
+    Check(!materialize(), "a two-byte store candidate accepted non-identity selects");
+    // The unsigned variant truncates x to 16 bits and zero-fills the rest.
+    const auto set_rgba16u = [&](uint32_t stride, uint32_t selects) {
+      set_byte_bounds(stride, 0u, Prospero::BufferFormat::k16_16_16_16UInt);
+      for (uint32_t key = 0; key < 8u; ++key) memory.words[32u + key * 4u + 3u] =
+          (static_cast<uint32_t>(Prospero::BufferFormat::k16_16_16_16UInt) << 12u) | selects;
+    };
+    set_rgba16u(8u, Libs::Graphics::DstSel(4, 5, 6, 7));
+    Check(materialize() && snapshot.buffers.size() == 8u,
+          "a one-component store to a tight RGBA16 unsigned record was refused");
+    set_rgba16u(16u, Libs::Graphics::DstSel(4, 5, 6, 7));
+    Check(!materialize(), "an RGBA16 unsigned store candidate accepted a stride it does not address");
+    set_rgba16u(8u, Libs::Graphics::DstSel(4, 5, 0, 1));
+    Check(!materialize(), "an RGBA16 unsigned store candidate accepted non-identity selects");
     // A one-component format's missing channels default to 0,0,0 or 0,0,1, both identity; any
     // other select pattern is still refused.
     set_byte_bounds(1u, 0u, Prospero::BufferFormat::k8UInt);
@@ -6725,6 +6822,24 @@ void TestBoundedBufferRecords(uint32_t d32_components) {
                   std::pair{memory.base + table_offset + row * 192u + member, uint64_t{16u}}) !=
                   snapshot.specialization_reads.end(),
               "record descriptor escaped same-dispatch overlap capture");
+  }
+  // A reachable row of a read-only table can hold plain data (here floats, with no stride)
+  // instead of a V#; it reads as a null buffer instead of rejecting the whole table.
+  {
+    const auto row = (table_offset + 2u * 192u + 160u) / 4u;
+    const std::array<uint32_t, 4> saved{memory.words[row], memory.words[row + 1u],
+                                        memory.words[row + 2u], memory.words[row + 3u]};
+    for (const auto& garbage : {std::array<uint32_t, 4>{2u, 0u, 0x3f73ddebu, 0x3e9b6cbcu},
+                                std::array<uint32_t, 4>{0xbca24d63u, 0u, 0xbe9b5325u, 0x3f73ea4fu}}) {
+      std::ranges::copy(garbage, memory.words.begin() + row);
+      const bool nulled = materialize() && snapshot.buffers.size() == 8u &&
+          std::ranges::none_of(snapshot.buffers, [&](const auto& buffer) {
+            return buffer.dwords[2] == garbage[2] || buffer.dwords[3] == garbage[3];
+          });
+      Check(nulled, "a data row in a read-only buffer table rejected the table or was not nulled");
+    }
+    std::ranges::copy(saved, memory.words.begin() + row);
+    Check(materialize(), "restored record table no longer materialized");
   }
   const auto original = specialization;
   memory.words[(table_offset + 160u) / 4u] += 0x100u;
@@ -7360,7 +7475,8 @@ void TestGpuSelectedFormattedRecordStore() {
   memory.words[first + 1u] = 1u << 16u;
   for (const auto [word, value] : std::array<std::pair<uint32_t, uint32_t>, 4>{{
       {first + 1u, (1u << 16u) | (1u << 31u)},
-      {first + 3u, (uint32_t(Prospero::BufferFormat::k8UNorm) << 12u) | 4u},
+      // UNorm8 is proved by GpuSelectedFormattedUNorm8Store; SNorm8 is not.
+      {first + 3u, (uint32_t(Prospero::BufferFormat::k8SNorm) << 12u) | 4u},
       {first + 3u, memory.words[first + 3u] | (1u << 28u)},
       {first + 3u, memory.words[first + 3u] | (4u << 3u)}}}) {
     const auto saved = memory.words[word];
@@ -7472,8 +7588,10 @@ void TestGpuSelectedFormattedRecordStore() {
     Check(!wide_materialize(), "RGBA16 store accepted unproved format, alignment, stride, bounds or swizzle");
     field = saved;
   }
-  wide_plan.info.buffers[wide_root].max_byte_extent = 4u;
-  Check(!wide_materialize(), "scalar formatted store incorrectly admitted an RGBA16 candidate");
+  // A one-component store converts x and zero-fills the rest (GPU-checked by
+  // GpuSelectedFormattedRgba16XStore); a partial two-component store is still unproved.
+  wide_plan.info.buffers[wide_root].max_byte_extent = 8u;
+  Check(!wide_materialize(), "two-component formatted store incorrectly admitted an RGBA16 candidate");
   wide_plan.info.buffers[wide_root].max_byte_extent = 16u;
   auto& wide_indirect = *wide_plan.descriptor_sources[
       wide_plan.info.buffers[wide_root].source].indirect_descriptor;
@@ -7686,6 +7804,98 @@ void TestGpuKeyedRawIndexedStore() {
     } else {
       Check(!accepted, "keyed descriptor table past the row limit was accepted");
     }
+  }
+  // A captured table holds 50,000 to 60,000 distinct descriptors and is materialized per
+  // dispatch; interning each candidate by a linear search took seconds per frame.
+  {
+    constexpr uint32_t table = 0x2000u;
+    constexpr uint32_t rows = 60000u;
+    LinearTestMemory memory;
+    memory.words.resize((table - memory.base) / 4u + rows * 4u, 0u);
+    const auto first = (table - memory.base) / 4u;
+    for (uint32_t row = 0; row < rows; ++row) {
+      const auto at = first + row * 4u;
+      memory.words[at] = 0x100000u + row * 0x100u;
+      memory.words[at + 1u] = 4u << 16u;
+      memory.words[at + 2u] = 0x40u;
+      memory.words[at + 3u] = 0x5204u;
+    }
+    std::array<uint32_t, 8> user_data{table, 16u << 16u, rows, 0x5204u};
+    const SrtRuntime runtime{.user_data = user_data, .userdata = &memory,
+                             .read_specialization_memory = ReadLinearTestMemory};
+    FakeGuestMemory fake(ReadLinearTestMemory, &memory);
+    ResourceSnapshot snapshot;
+    ResourceSpecialization specialization;
+    const auto start = std::chrono::steady_clock::now();
+    const bool accepted = MaterializeResources(plan, runtime, snapshot, specialization);
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start).count();
+    std::printf("[materialize] %u distinct candidates in %lld ms\n", rows, static_cast<long long>(ms));
+    Check(accepted && snapshot.buffers.size() >= rows, "distinct descriptor table lost candidates");
+    Check(ms < 500, "interning distinct candidates is not linear in the table size");
+  }
+  // Rows of a large table change layout between dispatches. With one specialization entry per
+  // candidate layout, every new table state compiled a new module (1.5 million SPIR-V words,
+  // seconds of driver time, per frame). A large table keeps its layouts in runtime words
+  // instead, and its candidate count in power-of-two buckets, so the module stays the same.
+  {
+    constexpr uint32_t table = 0x2000u;
+    const auto materialize = [&](uint32_t rows, uint32_t shift, ResourceSnapshot& snapshot,
+                                 ResourceSpecialization& specialization) {
+      LinearTestMemory memory;
+      memory.words.resize((table - memory.base) / 4u + rows * 4u, 0u);
+      const auto first = (table - memory.base) / 4u;
+      for (uint32_t row = 0; row < rows; ++row) {
+        const auto at = first + row * 4u;
+        memory.words[at] = 0x100000u + row * 0x100u;
+        memory.words[at + 1u] = (4u << ((row + shift) % 3u)) << 16u;
+        memory.words[at + 2u] = 0x40u;
+        memory.words[at + 3u] = 0x5204u;
+      }
+      std::array<uint32_t, 8> user_data{table, 16u << 16u, rows, 0x5204u};
+      const SrtRuntime runtime{.user_data = user_data, .userdata = &memory,
+                               .read_specialization_memory = ReadLinearTestMemory};
+      FakeGuestMemory fake(ReadLinearTestMemory, &memory);
+      return MaterializeResources(plan, runtime, snapshot, specialization);
+    };
+    const auto root_of = [](const ResourceSpecialization& specialization) {
+      for (uint32_t i = 0; i < specialization.buffers.size(); ++i)
+        if (specialization.buffers[i].indirect_root == i) return i;
+      return UINT32_MAX;
+    };
+    ResourceSnapshot first_snapshot, second_snapshot, grown_snapshot;
+    ResourceSpecialization first, second, grown;
+    Check(materialize(1000u, 0u, first_snapshot, first) && materialize(1000u, 1u, second_snapshot, second) &&
+              materialize(1010u, 2u, grown_snapshot, grown),
+          "large changing descriptor table did not specialize");
+    Check(first == second, "rows changing layout changed the specialization of a large table");
+    Check(first == grown, "a few more candidates changed the specialization of a large table");
+    Check(first_snapshot.flattened_srt != second_snapshot.flattened_srt,
+          "row layouts are not in the runtime words of a large table");
+    const auto root = root_of(second);
+    Check(root != UINT32_MAX, "large table lost its root");
+    if (root != UINT32_MAX) {
+      const auto& srt = second_snapshot.flattened_srt;
+      const auto mapping = second.buffers[root].indirect_mapping_offset;
+      const auto length = srt[mapping];
+      bool strides = true;
+      for (const uint32_t row : {0u, 1u, 2u, 500u, 999u}) {
+        const auto ordinal = srt[mapping + 1u + row];
+        const auto word = srt[mapping + 1u + length + ordinal];
+        strides &= ordinal != 0u && (word >> 16u) == (4u << ((row + 1u) % 3u));
+      }
+      Check(strides, "runtime layout words do not carry each candidate's stride");
+    }
+    // A small table keeps compile-time layouts.
+    ResourceSnapshot small_snapshot;
+    ResourceSpecialization small;
+    Check(materialize(100u, 0u, small_snapshot, small), "small descriptor table did not specialize");
+    const auto small_root = root_of(small);
+    bool compile_time = small_root != UINT32_MAX && small.buffers.size() > 100u;
+    for (uint32_t i = 0; compile_time && i < small.buffers.size(); ++i)
+      if (small.buffers[i].indirect_root == small_root && i != small_root)
+        compile_time = (small.buffers[i].packed_stride & 0x3fffu) != 0u;
+    Check(compile_time, "small descriptor table lost its compile-time candidate layouts");
   }
 }
 
