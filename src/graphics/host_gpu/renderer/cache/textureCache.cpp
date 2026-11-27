@@ -1521,7 +1521,10 @@ vk::ImageView TextureCache::AcquireAtomicShadow(ImageId id, const ImageDesc& des
 	m_scheduler.EndRendering();
 	auto       command = m_scheduler.Current().Handle();
 	const bool is_3d   = image.backing.image_type == vk::ImageType::e3D;
-	image.Transit(vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderRead, {}, command);
+	// Other bindings of this image in the same draw or dispatch may still write it, so its tracked
+	// access keeps ShaderWrite for the barriers that follow.
+	image.Transit(vk::ImageLayout::eGeneral,
+	              vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite, {}, command);
 	image.TransitAtomicShadow(vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderWrite,
 	                          vk::PipelineStageFlagBits2::eComputeShader, command);
 	const auto& view = desc.view_info;

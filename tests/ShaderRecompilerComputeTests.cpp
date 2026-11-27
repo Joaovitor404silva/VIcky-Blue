@@ -49455,6 +49455,19 @@ TestCase ImageAtomicNarrowInteger(bool is_16bit) {
   AppendStoreVgpr(&code, 2, 3);
   test.expected.push_back(0x0au);
 
+  // Texel 4 (x 0, y 1): ADD keeps the shadow's high half, which holds the value the texel had when the
+  // shadow was filled (the write-back compares against it), and returns only the low bits.
+  const u32 baseline = 0x55u << 16u;
+  test.storage_image_r32ui[4] = baseline | 0x10u;
+  test.expected_storage_image_r32ui[4] = baseline | 0x11u;
+  AppendVMovU32(&code, 0, 0); // (0, 1): texel 4 of the 4x4 image.
+  AppendVMovU32(&code, 1, 1);
+  AppendVMovLiteral(&code, 2, 0x01u);
+  code.push_back(EncodeMimg0(0x11, 1u, 0, true)); // IMAGE_ATOMIC_ADD
+  code.push_back(EncodeMimg1(2, 0));
+  AppendStoreVgpr(&code, 2, 4);
+  test.expected.push_back(0x10u);
+
   code.push_back(EncodeSopp(0x01, 0)); // s_endpgm
   test.initial.assign(test.expected.size(), 0xdeadbeefu);
   return test;

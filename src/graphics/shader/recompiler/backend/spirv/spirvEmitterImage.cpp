@@ -1209,7 +1209,12 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 							               break;
 						               default: ctx.Fail(inst, "unsupported narrow image atomic"); break;
 					               }
-					               return Binary(state, spv::OpBitwiseAnd, u32, next, mask);
+					               // Bits 16..31 of a shadow texel keep the value it had when the
+					               // shadow was filled; the write-back compares against them.
+					               return Binary(state, spv::OpBitwiseOr, u32,
+					                             Binary(state, spv::OpBitwiseAnd, u32, current,
+					                                    ConstantU32(state, 0xffff0000u)),
+					                             Binary(state, spv::OpBitwiseAnd, u32, next, mask));
 				               });
 				           return Binary(state, spv::OpBitwiseAnd, u32, old, mask);
 			           }
