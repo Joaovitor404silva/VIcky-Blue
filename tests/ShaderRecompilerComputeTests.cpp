@@ -49473,6 +49473,41 @@ TestCase ImageAtomicNarrowInteger(bool is_16bit) {
   return test;
 }
 
+// On signed integer images the pre-op value returns sign-extended, as a load of the texel does;
+// the texel itself keeps only its own width.
+TestCase ImageAtomicNarrowSigned(bool is_16bit) {
+  using F = Prospero::BufferFormat;
+  TestCase test;
+  test.name = is_16bit ? "ImageAtomicNarrowSigned16Bit" : "ImageAtomicNarrowSigned8Bit";
+  test.user_data = MakeStorageTextureData(is_16bit ? F::k16SInt : F::k8SInt);
+  test.has_user_data = true;
+  test.storage_image_r32ui.assign(16, 0);
+  test.expected_storage_image_r32ui.assign(16, 0);
+  auto &code = test.code;
+  const u32 minus_two = is_16bit ? 0xfffeu : 0xfeu;
+  // texel, opcode (0x14 SMIN, 0x16 SMAX, 0x11 ADD), previous, source, expected texel.
+  const u32 cases[][5] = {
+      {0, 0x14u, minus_two, 0x01u, minus_two}, // smin(-2, 1) = -2
+      {1, 0x16u, minus_two, 0x01u, 0x01u},     // smax(-2, 1) = 1
+      {2, 0x11u, minus_two, 0x03u, 0x01u},     // -2 + 3 = 1
+      {3, 0x11u, 0x05u, 0x01u, 0x06u},         // a positive pre-op value is unchanged
+  };
+  for (const auto &c : cases) {
+    test.storage_image_r32ui[c[0]] = c[2];
+    test.expected_storage_image_r32ui[c[0]] = c[4];
+    AppendVMovU32(&code, 0, c[0]);
+    AppendVMovU32(&code, 1, 0);
+    AppendVMovLiteral(&code, 2, c[3]);
+    code.push_back(EncodeMimg0(c[1], 1u, 0, true));
+    code.push_back(EncodeMimg1(2, 0));
+    AppendStoreVgpr(&code, 2, c[0]);
+    test.expected.push_back(c[2] == minus_two ? 0xfffffffeu : c[2]);
+  }
+  code.push_back(EncodeSopp(0x01, 0)); // s_endpgm
+  test.initial.assign(test.expected.size(), 0xdeadbeefu);
+  return test;
+}
+
 // Float min/max on a 16Float image compare the texels as halves, not as 32-bit floats.
 TestCase ImageAtomicNarrowFloat16() {
   using F = Prospero::BufferFormat;
@@ -51226,6 +51261,8 @@ std::vector<TestCase> MakeCases() {
   }
   cases.push_back(ImageAtomicNarrowInteger(false));
   cases.push_back(ImageAtomicNarrowInteger(true));
+  cases.push_back(ImageAtomicNarrowSigned(false));
+  cases.push_back(ImageAtomicNarrowSigned(true));
   cases.push_back(ImageAtomicNarrowFloat16());
   AddCase(ImageAtomicFloatGlcAndExec<true>);
   AddCase(ImageAtomicFloatGlcAndExec<false>);
@@ -59232,6 +59269,8 @@ int main(int argc, char **argv) {
     }
     RunCase(&vulkan, ImageAtomicNarrowInteger(false));
     RunCase(&vulkan, ImageAtomicNarrowInteger(true));
+    RunCase(&vulkan, ImageAtomicNarrowSigned(false));
+    RunCase(&vulkan, ImageAtomicNarrowSigned(true));
     RunCase(&vulkan, ImageAtomicNarrowFloat16());
     return 0;
   }

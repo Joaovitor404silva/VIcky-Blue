@@ -168,6 +168,7 @@ struct ImageResource {
 	bool                          atomic            = false;
 	bool                          atomic64          = false;
 	uint8_t                       atomic_bits       = 0; // 8 or 16 when shadowed through R32Uint.
+	bool                          atomic_signed     = false; // A narrow atomic image of a SInt format.
 	bool                          unfiltered_access_only = true;
 	bool                          sample_access_only     = true; // Every use is a sample.
 	bool                          depth_compare     = false;

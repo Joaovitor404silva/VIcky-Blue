@@ -1023,7 +1023,8 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 			    fmt::format("atomic image descriptor {} uses unsupported format {}", i,
 			                static_cast<uint32_t>(format)));
 		}
-		image.atomic_bits = narrow_atomic_bits;
+		image.atomic_bits   = narrow_atomic_bits;
+		image.atomic_signed = false;
 		const bool storage      = base.resource_class == ImageResourceClass::Storage;
 		image.fmask             = Prospero::IsFmaskTextureFormat(format);
 		if (image.fmask) {
@@ -1082,6 +1083,9 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 				    fmt::format("storage image descriptor {} uses unsupported format {}", i,
 				                static_cast<uint32_t>(format)));
 			}
+			// Atomics bind an unsigned view; a narrow one keeps its signedness for its results.
+			image.atomic_signed = image.atomic_bits != 0u &&
+			                     image.numeric_class == Prospero::TextureNumericClass::Sint;
 			if (raw_sint_storage || base.atomic) {
 				image.numeric_class = Prospero::TextureNumericClass::Uint;
 			}
@@ -1956,6 +1960,7 @@ void ApplyResourceSpecialization(Program& program, const ResourceSpecialization&
 		image.skip_degamma               = source.skip_degamma;
 		image.heap                       = source.heap;
 		image.atomic_bits                = source.atomic_bits;
+		image.atomic_signed              = source.atomic_signed;
 		image.indirect_resources.clear();
 	}
 	for (uint32_t index = 0; index < images.size(); index++) {

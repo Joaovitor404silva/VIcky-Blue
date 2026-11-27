@@ -1242,6 +1242,11 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 					                                    ConstantU32(state, 0xffff0000u)),
 					                             Binary(state, spv::OpBitwiseAnd, u32, next, mask));
 				               });
+				           // The pre-op value returns as the texel reads: signed integer formats
+				           // sign-extend, as their loads through an R8/R16 SINT view do.
+				           if (image.atomic_signed) {
+					           return sext(old);
+				           }
 				           return Binary(state, spv::OpBitwiseAnd, u32, old, mask);
 			           }
 			           const auto old = EmitAtomicOperation(ctx, inst, pointer, spv::ScopeDevice);
