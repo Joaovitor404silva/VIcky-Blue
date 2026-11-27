@@ -55,6 +55,23 @@ struct Hitch {
 	CounterTotals     deltas {};
 };
 
+std::string HitchActivity(const Hitch& hitch);
+
+// Each hitch also goes to the log with where its time went, for runs nobody watches.
+void LogHitch(const Hitch& hitch) {
+	const auto ms = [&](Counter counter) {
+		return static_cast<double>(hitch.deltas[static_cast<size_t>(counter)]) / 1e6;
+	};
+	std::printf("Perf hitch: %.0f ms: guest GPU %.0f ms, compile %.0f ms, GPU wait %.0f ms, "
+	            "present %.0f ms, draws %.0f, dispatches %.0f; %s\n",
+	            hitch.ms, ms(Counter::GpuThreadBusyNs),
+	            ms(Counter::ShaderCompileNs) + ms(Counter::PipelineCreateNs), ms(Counter::GpuWaitNs),
+	            ms(Counter::PresentNs),
+	            static_cast<double>(hitch.deltas[static_cast<size_t>(Counter::Draws)]),
+	            static_cast<double>(hitch.deltas[static_cast<size_t>(Counter::Dispatches)]),
+	            HitchActivity(hitch).c_str());
+}
+
 // Tables as wide as their columns; the default fills the window, which an auto-resizing
 // window then never shrinks.
 constexpr ImGuiTableFlags TABLE_FLAGS =
@@ -99,6 +116,7 @@ struct FrameWindow {
 					hitch.deltas[i] = totals[i] - flip_totals[i];
 				}
 				next_hitch = (next_hitch + 1) % HITCH_HISTORY;
+				LogHitch(hitch);
 			}
 			average_ms = average_ms > 0.0f ? average_ms * 0.95f + ms * 0.05f : ms;
 		}
