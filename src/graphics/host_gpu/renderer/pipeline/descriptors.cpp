@@ -34,7 +34,9 @@
 #include <bit>
 #include <fmt/format.h>
 #include <limits>
+#include <mutex>
 #include <span>
+#include <unordered_set>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -770,6 +772,23 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 	}
 }
 
+// Once per guest address (at most MaxLogged of them), so the null fallback below stays visible
+// without flooding the log on every draw.
+static void LogUnmappedBufferDescriptor(uint64_t shader_hash, uint32_t resource, uint64_t address,
+                                        uint64_t size, bool written) {
+	constexpr size_t                    MaxLogged = 64;
+	static std::mutex                   mutex;
+	static std::unordered_set<uint64_t> logged;
+	{
+		std::scoped_lock lock {mutex};
+		if (logged.size() >= MaxLogged || !logged.insert(address).second) return;
+	}
+	Log::WriteToConsoleAndLog(fmt::format(
+	    "GPU: buffer descriptor {} of shader 0x{:016x} points at unmapped memory 0x{:x} (size 0x{:x}, "
+	    "{}); bound as a null buffer\n",
+	    resource, shader_hash, address, size, written ? "written" : "read-only"));
+}
+
 void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 	KYTY_PROFILER_FUNCTION();
 	auto& cache = m_context.GetBufferCache();
@@ -818,13 +837,22 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 				const auto  limit =
 				    uint64_t {graphics.GetPhysicalDeviceProperties().limits.maxStorageBufferRange} -
 				    (graphics.StorageMinAlignment() - 1);
-				size = Libs::LibKernel::Memory::ClampRangeSize(
+				size = Libs::LibKernel::Memory::TryClampRangeSize(
 				    address, std::min({size, uint64_t {256} * 1024 * 1024, limit}));
 			} else if (size >= (uint64_t {1} << 30u)) {
 				//  PPSA18026
 				// Finite descriptors can span sparse PRT holes; oversized pool windows are mapped
 				// in pieces, so they end at their last committed range.
-				size = Libs::LibKernel::Memory::ClampRangeSize(address, size, true);
+				size = Libs::LibKernel::Memory::TryClampRangeSize(address, size, true);
+			}
+			if (size == 0) {
+				// The guest can leave a descriptor it does not use pointing at unmapped memory;
+				// hardware faults only on access, so it binds as a null descriptor. Logged once per
+				// address, so a real address bug still leaves a trace.
+				LogUnmappedBufferDescriptor(program.shader_hash, resource, address, descriptor.GetSize(),
+				                            metadata.written);
+				source = {};
+				continue;
 			}
 			source = {address, size, cache.FindBuffer(address, size)};
 		}

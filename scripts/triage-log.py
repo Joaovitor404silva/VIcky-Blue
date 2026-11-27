@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from collections import Counter, OrderedDict
@@ -162,8 +163,44 @@ def parse(path):
     return build, list(problems.values())
 
 
+def find_bash():
+    """The bash to run policy-check.sh with.
+
+    On Windows a bare "bash", and often the first "bash" on PATH, is a WSL launcher (System32 or
+    WindowsApps), which cannot see this checkout's Windows paths. Prefer the Git for Windows bash:
+    next to git on PATH, then under the usual install folders, then any PATH hit that is not a
+    WSL launcher.
+    """
+    if os.name != "nt":
+        return shutil.which("bash") or "bash"
+    candidates = []
+    git = shutil.which("git")
+    if git:
+        # git.exe lives in <Git>\cmd, <Git>\bin or <Git>\mingw64\bin.
+        here = os.path.dirname(os.path.realpath(git))
+        for root in (os.path.dirname(here), os.path.dirname(os.path.dirname(here))):
+            candidates += [os.path.join(root, "bin", "bash.exe"),
+                           os.path.join(root, "usr", "bin", "bash.exe")]
+    for env in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        base = os.environ.get(env)
+        if base:
+            for sub in (("Git",), ("Programs", "Git")):
+                candidates.append(os.path.join(base, *sub, "bin", "bash.exe"))
+    for path in os.environ.get("PATH", "").split(os.pathsep):
+        candidates.append(os.path.join(path, "bash.exe"))
+    wsl_dirs = [os.path.normcase(d) for d in (
+        os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WindowsApps"))]
+    for candidate in candidates:
+        folder = os.path.normcase(os.path.dirname(os.path.abspath(candidate)))
+        if os.path.isfile(candidate) and folder not in wsl_dirs:
+            return candidate
+    return "bash"
+
+
 def policy_ok(text):
-    proc = subprocess.run(["bash", os.path.join(HERE, "policy-check.sh"), "text", "triage report"],
+    bash = find_bash()
+    proc = subprocess.run([bash, os.path.join(HERE, "policy-check.sh"), "text", "triage report"],
                           input=text.encode("utf-8"), cwd=ROOT)
     return proc.returncode == 0
 

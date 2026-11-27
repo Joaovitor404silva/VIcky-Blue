@@ -149,7 +149,7 @@ template <class S, class T> void Io(S& io, T& value) {
 	}
 KYTY_IO_FIELDS(MemoryInfo, a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w, x,
                y, z)
-KYTY_IO_FIELDS(BufferResource, a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q)
+KYTY_IO_FIELDS(BufferResource, a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r)
 KYTY_IO_FIELDS(ImageResource, a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w,
                x, y, z, A, B)
 KYTY_IO_FIELDS(SamplerResource, a, b, c, d, e, f, g, h, i, j, k)
@@ -170,10 +170,11 @@ KYTY_IO_FIELDS(SrtRead, a, b)
 KYTY_IO_FIELDS(ResourceBlock, a, b, c, d, e)
 KYTY_IO_FIELDS(UniformFill, a, b, c, d, e, f)
 KYTY_IO_FIELDS(UniformFillPlan, a, b, c, d)
-KYTY_IO_FIELDS(ResourceSpecialization::Buffer, a, b, c, d, e, f, g, h)
+KYTY_IO_FIELDS(ResourceSpecialization::Buffer, a, b, c, d, e, f, g, h, i)
+KYTY_IO_FIELDS(ResourceSpecialization::BufferLayoutClass, a, b, c, d)
 KYTY_IO_FIELDS(ResourceSpecialization::Image, a, b, c, d, e, f, g, h, i, j, k, l, m, n, o)
 KYTY_IO_FIELDS(ResourceSpecialization::Sampler, a, b, c)
-KYTY_IO_FIELDS(ResourceSpecialization, a, b, c)
+KYTY_IO_FIELDS(ResourceSpecialization, a, b, c, d)
 KYTY_IO_FIELDS(Bindings, a, b, c, d, e, f)
 KYTY_IO_FIELDS(CompiledShaderInfo, a, b, c, d, e, f, g, h)
 KYTY_IO_FIELDS(Spirv::Profile, a, b, c, d, e, f, g, h)

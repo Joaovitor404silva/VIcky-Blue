@@ -384,6 +384,35 @@ list(APPEND kyty_emulator_src
 	"${KYTY_SOURCE_DIR}/emulator.h"
 	"${KYTY_SOURCE_DIR}/emulator.cpp"
 )
+
+# Shader store records stay valid across rebuilds that leave these sources unchanged.
+file(GLOB_RECURSE shader_store_sources CONFIGURE_DEPENDS
+	"${KYTY_SOURCE_DIR}/graphics/shader/*.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/*.h"
+	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/*.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/*.h"
+)
+# The recompiler and resource specialization also read the guest GPU's format, tile and register
+# definitions; a change there changes what records hold.
+file(GLOB shader_store_guest_gpu_sources CONFIGURE_DEPENDS
+	"${KYTY_SOURCE_DIR}/graphics/guest_gpu/*.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/guest_gpu/*.h"
+)
+list(APPEND shader_store_sources ${shader_store_guest_gpu_sources})
+set(shader_store_source_list "${PROJECT_BINARY_DIR}/kytyShaderStoreSources.txt")
+string(REPLACE ";" "\n" shader_store_source_lines "${shader_store_sources}")
+file(GENERATE OUTPUT "${shader_store_source_list}" CONTENT "${shader_store_source_lines}\n")
+set(shader_store_version_header "${PROJECT_BINARY_DIR}/kytyShaderStoreVersion.h")
+add_custom_command(
+	OUTPUT "${shader_store_version_header}"
+	COMMAND ${CMAKE_COMMAND}
+		-D SOURCE_LIST=${shader_store_source_list}
+		-D OUTPUT_FILE=${shader_store_version_header}
+		-P ${KYTY_SOURCE_DIR}/shader_store_version.cmake
+	DEPENDS ${shader_store_sources} "${shader_store_source_list}" "${KYTY_SOURCE_DIR}/shader_store_version.cmake"
+	COMMENT "Generate kytyShaderStoreVersion.h"
+)
+list(APPEND kyty_emulator_src "${shader_store_version_header}")
 list(REMOVE_DUPLICATES kyty_emulator_src)
 
 if (KYTY_CLANG_CL)
