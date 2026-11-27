@@ -691,6 +691,14 @@ public:
 	[[nodiscard]] const std::map<uint64_t, Mapping>& GetMappings() const { return m_mappings; }
 
 private:
+	struct PhysRef {
+		uint64_t end   = 0;
+		uint32_t count = 0;
+	};
+
+	void                                  AddPhysRef(uint64_t start, uint64_t size);
+	void                                  RemovePhysRef(uint64_t start, uint64_t size,
+	                                                    PhysicalRanges& freed);
 	void                                  ReclaimAutomatic(uint64_t start, uint64_t size);
 	std::map<uint64_t, Mapping>::iterator SplitMapping(uint64_t vaddr);
 
@@ -700,6 +708,8 @@ private:
 	// Track backing ownership while a transaction changes views before publishing VirtualRanges.
 	// Names, protections and memory types live only in VirtualRanges. Physical offsets may alias.
 	std::map<uint64_t, Mapping> m_mappings;
+	// Non-overlapping physical intervals mapped by active virtual views, with alias refcounts.
+	std::map<uint64_t, PhysRef> m_phys_refs;
 };
 
 class FlexibleMemory {
@@ -1148,13 +1158,112 @@ void PhysicalMemory::RestoreAutomatic(const PhysicalRanges& ranges) {
 	}
 }
 
+void PhysicalMemory::AddPhysRef(uint64_t start, uint64_t size) {
+	if (size == 0) {
+		return;
+	}
+	const auto end = start + size;
+	auto       split_at = [&](uint64_t pos) {
+		auto it = m_phys_refs.lower_bound(pos);
+		if (it != m_phys_refs.begin()) {
+			auto prev = std::prev(it);
+			if (prev->second.end > pos) {
+				const auto prev_end = prev->second.end;
+				const auto count    = prev->second.count;
+				prev->second.end    = pos;
+				it                  = m_phys_refs.emplace_hint(it, pos, PhysRef {prev_end, count});
+			}
+		}
+		return it;
+	};
+
+	split_at(end);
+	auto       it  = split_at(start);
+	uint64_t   cur = start;
+	while (cur < end) {
+		if (it == m_phys_refs.end() || it->first > cur) {
+			const auto next_pos = (it == m_phys_refs.end()) ? end : std::min(end, it->first);
+			it                  = m_phys_refs.emplace_hint(it, cur, PhysRef {next_pos, 1u});
+			cur                 = next_pos;
+			++it;
+		} else {
+			it->second.count++;
+			cur = it->second.end;
+			++it;
+		}
+	}
+	// Coalesce adjacent spans with identical refcounts around [start, end].
+	auto coalesce = [&](uint64_t pos) {
+		auto cur_it = m_phys_refs.find(pos);
+		if (cur_it != m_phys_refs.end() && cur_it != m_phys_refs.begin()) {
+			auto prev = std::prev(cur_it);
+			if (prev->second.end == cur_it->first && prev->second.count == cur_it->second.count) {
+				prev->second.end = cur_it->second.end;
+				m_phys_refs.erase(cur_it);
+			}
+		}
+	};
+	coalesce(start);
+	coalesce(end);
+}
+
+void PhysicalMemory::RemovePhysRef(uint64_t start, uint64_t size, PhysicalRanges& freed) {
+	if (size == 0) {
+		return;
+	}
+	const auto end = start + size;
+	auto       split_at = [&](uint64_t pos) {
+		auto it = m_phys_refs.lower_bound(pos);
+		if (it != m_phys_refs.begin()) {
+			auto prev = std::prev(it);
+			if (prev->second.end > pos) {
+				const auto prev_end = prev->second.end;
+				const auto count    = prev->second.count;
+				prev->second.end    = pos;
+				it                  = m_phys_refs.emplace_hint(it, pos, PhysRef {prev_end, count});
+			}
+		}
+		return it;
+	};
+
+	split_at(end);
+	auto it = split_at(start);
+	while (it != m_phys_refs.end() && it->first < end) {
+		EXIT_IF(it->second.count == 0);
+		it->second.count--;
+		if (it->second.count == 0) {
+			const auto seg_start = it->first;
+			const auto seg_size  = it->second.end - it->first;
+			if (!freed.empty() && freed.back().first + freed.back().second == seg_start) {
+				freed.back().second += seg_size;
+			} else {
+				freed.emplace_back(seg_start, seg_size);
+			}
+			it = m_phys_refs.erase(it);
+		} else {
+			++it;
+		}
+	}
+	auto coalesce = [&](uint64_t pos) {
+		auto cur_it = m_phys_refs.find(pos);
+		if (cur_it != m_phys_refs.end() && cur_it != m_phys_refs.begin()) {
+			auto prev = std::prev(cur_it);
+			if (prev->second.end == cur_it->first && prev->second.count == cur_it->second.count) {
+				prev->second.end = cur_it->second.end;
+				m_phys_refs.erase(cur_it);
+			}
+		}
+	};
+	coalesce(start);
+	coalesce(end);
+}
+
 void PhysicalMemory::ReclaimAutomatic(uint64_t start, uint64_t size) {
 	const auto end   = start + size;
 	auto       owner = m_physical.upper_bound(start);
 	if (owner != m_physical.begin()) {
 		--owner;
 	}
-	bool automatic = false;
 	for (; owner != m_physical.end() && owner->first < end; ++owner) {
 		const auto& block = owner->second;
 		if (block.kind != AllocationKind::Automatic || block.start_addr + block.size <= start) {
@@ -1163,16 +1272,6 @@ void PhysicalMemory::ReclaimAutomatic(uint64_t start, uint64_t size) {
 		const auto first = std::max(start, block.start_addr);
 		const auto last  = std::min(end, block.start_addr + block.size);
 		AddFreeRange(m_automatic_free, first, last - first);
-		automatic = true;
-	}
-	if (automatic) {
-		for (const auto& [vaddr, mapping]: m_mappings) {
-			const auto first = std::max(start, mapping.start_addr);
-			const auto last  = std::min(end, mapping.start_addr + mapping.size);
-			if (first < last) {
-				RemoveFreeRange(m_automatic_free, first, last - first);
-			}
-		}
 	}
 }
 
@@ -1218,6 +1317,7 @@ bool PhysicalMemory::Map(uint64_t vaddr, uint64_t phys_addr, size_t len) {
 	}
 
 	m_mappings.emplace_hint(next, vaddr, Mapping {phys_addr, len});
+	AddPhysRef(phys_addr, len);
 	RemoveFreeRange(m_automatic_free, phys_addr, len);
 	return true;
 }
@@ -1311,10 +1411,15 @@ bool PhysicalMemory::Unmap(uint64_t vaddr, uint64_t size) {
 	}
 	const auto last = SplitMapping(end);
 	first           = SplitMapping(vaddr);
+	PhysicalRanges unmapped_phys;
 	while (first != last) {
 		const auto removed = first->second;
 		first              = m_mappings.erase(first);
-		ReclaimAutomatic(removed.start_addr, removed.size);
+		unmapped_phys.clear();
+		RemovePhysRef(removed.start_addr, removed.size, unmapped_phys);
+		for (const auto& [phys_start, phys_size]: unmapped_phys) {
+			ReclaimAutomatic(phys_start, phys_size);
+		}
 	}
 	return true;
 }

@@ -303,6 +303,17 @@ void TestRangeSet() {
             intersections[0].second == 0x1040 &&
             intersections[1].first == 0x1220 && intersections[1].second == 0x1240,
         "range set subtraction did not preserve both exact tails");
+  // Split a single interval in the middle, bridge across multiple intervals, then clear all.
+  ranges.Add(0x2000, 0x300);
+  ranges.Subtract(0x2100, 0x100);
+  Check(ranges.Contains(0x2000, 0x100) && !ranges.Intersects(0x2100, 0x100) &&
+            ranges.Contains(0x2200, 0x100),
+        "range set middle split did not preserve both halves");
+  ranges.Add(0x1040, 0x11c0);
+  Check(ranges.Contains(0x1000, 0x1300),
+        "range set bridge add did not coalesce across multiple intervals");
+  ranges.Subtract(0x1000, 0x1300);
+  Check(ranges.Empty(), "range set did not become empty after full subtraction");
 }
 
 void TestGuestRange() {
