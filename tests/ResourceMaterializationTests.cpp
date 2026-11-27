@@ -1398,6 +1398,14 @@ void TestUnreachedImageIgnoresSharedDescriptor(bool atomic64) {
   data[1] = 1u;
   Check(!MaterializeResources(plan, runtime, snapshot, specialization),
         "reached atomic image accepted a format its width rejects");
+  // Atomics operate on texel bits, so float images of the atomic's width are accepted too.
+  for (const auto format : {BufferFormat::k32UInt, BufferFormat::k32Float, BufferFormat::k32_32UInt,
+                            BufferFormat::k32_32Float}) {
+    const bool wide = format == BufferFormat::k32_32UInt || format == BufferFormat::k32_32Float;
+    data[0] = uint32_t(format) << 20u;
+    Check(MaterializeResources(plan, runtime, snapshot, specialization) == (wide == atomic64),
+          "reached atomic image rejected a format of its width or accepted another width");
+  }
   // 8-bit and 16-bit formats are accepted for 32-bit atomics (shadowed through R32Uint) and
   // rejected for 64-bit atomics. k8SInt is left out: images 0 and 2 share this descriptor as
   // write-only storage, which has no 8-bit signed view (signed atomics are covered elsewhere).

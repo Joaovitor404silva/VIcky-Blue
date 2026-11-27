@@ -1007,8 +1007,11 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 		    static_cast<Prospero::BufferFormat>((descriptor.dwords[1] >> 20u) & 0x1ffu);
 		const uint8_t narrow_atomic_bits =
 		    base.atomic && !base.atomic64 ? AtomicImageBits(format) : 0u;
+		// Image atomics act on texel bits through an unsigned view of the same width; 8- and
+		// 16-bit images run 32-bit atomics on an R32_UINT shadow.
 		if (base.atomic &&
-		    (base.atomic64 ? format != Prospero::BufferFormat::k32_32UInt
+		    (base.atomic64 ? format != Prospero::BufferFormat::k32_32UInt &&
+		                         format != Prospero::BufferFormat::k32_32Float
 		                   : narrow_atomic_bits == 0u &&
 		                         format != Prospero::BufferFormat::k32UInt &&
 		                         format != Prospero::BufferFormat::k32SInt &&
