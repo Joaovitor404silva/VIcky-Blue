@@ -384,6 +384,13 @@ file(GLOB_RECURSE shader_store_sources CONFIGURE_DEPENDS
 	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/*.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/*.h"
 )
+# The recompiler and resource specialization also read the guest GPU's format, tile and register
+# definitions; a change there changes what records hold.
+file(GLOB shader_store_guest_gpu_sources CONFIGURE_DEPENDS
+	"${KYTY_SOURCE_DIR}/graphics/guest_gpu/*.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/guest_gpu/*.h"
+)
+list(APPEND shader_store_sources ${shader_store_guest_gpu_sources})
 set(shader_store_source_list "${PROJECT_BINARY_DIR}/kytyShaderStoreSources.txt")
 string(REPLACE ";" "\n" shader_store_source_lines "${shader_store_sources}")
 file(GENERATE OUTPUT "${shader_store_source_list}" CONTENT "${shader_store_source_lines}\n")

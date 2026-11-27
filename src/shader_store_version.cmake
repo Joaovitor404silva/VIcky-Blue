@@ -1,8 +1,13 @@
 # Writes OUTPUT_FILE with a hash of the sources that decide what shader store records hold, so a
 # store survives rebuilds that do not change them. SOURCE_LIST is a file listing those sources.
+#
+# Bump SCHEMA by hand when records must be dropped for a reason outside the hashed sources, for
+# example a change to a header elsewhere that the recompiler includes or to a third-party library
+# that generates or optimizes the SPIR-V.
+set(SCHEMA 1)
 file(STRINGS "${SOURCE_LIST}" sources)
 list(SORT sources)
-set(combined "")
+set(combined "schema=${SCHEMA};")
 foreach(source IN LISTS sources)
 	file(SHA256 "${source}" digest)
 	string(APPEND combined "${digest}")
