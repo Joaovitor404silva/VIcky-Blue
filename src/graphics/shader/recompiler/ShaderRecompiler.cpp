@@ -673,6 +673,7 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 		}
 	}
 	ir.value_storage.clear();
+	IR::ConstantPropagationPass(ir.blocks, ir.wave_size);
 	IR::RemoveIdentities(ir);
 	IR::EliminateDeadCode(ir.blocks);
 	if (options.profile->ray_query) {
