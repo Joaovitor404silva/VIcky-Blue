@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <fmt/format.h>
 #include <functional>
+#include <mutex>
 #include <numeric>
 #include <unordered_map>
 #include <unordered_set>
@@ -233,6 +234,24 @@ bool ReadScalarTable(uint64_t base, uint64_t size, uint64_t offset,
 	return ReadTable(base & AddressMask & ~uint64_t {3}, size, offset & ~uint64_t {3}, runtime, words);
 }
 
+// A real stride-0 V# that fails the swizzle, ADD_TID or bounds rules would also read as null below,
+// so each distinct row that does is logged once (at most MaxLogged of them).
+void LogNulledDataRow(const DescriptorValue& value) {
+	constexpr size_t                    MaxLogged = 32;
+	static std::mutex                   mutex;
+	static std::unordered_set<uint64_t> logged;
+	uint64_t key = 0xcbf29ce484222325ull;
+	for (uint32_t i = 0; i < 4u; ++i) key = (key ^ value.dwords[i]) * 0x100000001b3ull;
+	{
+		std::scoped_lock lock {mutex};
+		if (logged.size() >= MaxLogged || !logged.insert(key).second) return;
+	}
+	std::fprintf(stderr,
+	             "shader resource specialization: read-only buffer table row %08x,%08x,%08x,%08x has "
+	             "stride 0 and fails the V# rules; read as a null buffer\n",
+	             value.dwords[0], value.dwords[1], value.dwords[2], value.dwords[3]);
+}
+
 bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferResource& resource) {
 	ShaderBufferResource descriptor;
 	if (!DecodeBufferDescriptor(value, descriptor)) return false;
@@ -254,6 +273,7 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 		// keeps floats next to its descriptors. Such a row has no stride, which no indexed record
 		// buffer has, so it reads as a null buffer; one with a stride is a real V# and still fails.
 		if (!resource.written && indexed && descriptor.Stride() == 0u) {
+			LogNulledDataRow(value);
 			value.dwords.fill(0u);
 			return true;
 		}
