@@ -1,0 +1,37 @@
+#version 450
+
+// Copies an 8- or 16-bit atomic image to and from its R32_UINT shadow.
+// TO_SHADOW: shadow = value | value << 16. Atomics change only the low bits, so the high half keeps
+// the value the texel had when the shadow was filled.
+// Otherwise: a texel is written back only where its low bits differ from that value, so writes
+// that other bindings of the same image made during the draw or dispatch are kept.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+#ifdef IS_3D
+layout(set = 0, binding = 0, SRC_FMT) uniform readonly uimage3D src_img;
+layout(set = 0, binding = 1, DST_FMT) uniform writeonly uimage3D dst_img;
+#else
+layout(set = 0, binding = 0, SRC_FMT) uniform readonly uimage2DArray src_img;
+layout(set = 0, binding = 1, DST_FMT) uniform writeonly uimage2DArray dst_img;
+#endif
+
+layout(push_constant) uniform Params {
+	uvec3 extent;
+};
+
+void main() {
+	uvec3 p = gl_GlobalInvocationID;
+	if (p.x >= extent.x || p.y >= extent.y || p.z >= extent.z) {
+		return;
+	}
+	const uint value = imageLoad(src_img, ivec3(p)).x;
+#ifdef TO_SHADOW
+	imageStore(dst_img, ivec3(p), uvec4(value | (value << 16u)));
+#else
+	const uint current = value & VALUE_MASK;
+	if (current != ((value >> 16u) & VALUE_MASK)) {
+		imageStore(dst_img, ivec3(p), uvec4(current));
+	}
+#endif
+}

@@ -308,10 +308,14 @@ void ValidateStorageTexture(const ShaderRecompiler::IR::ImageResource& resource,
 	    ShaderRecompiler::IR::RawSignedStorageFormat(resource, format) != Prospero::BufferFormat::kInvalid;
 	const auto numeric_class =
 	    Prospero::SampledTextureNumericClass(Prospero::RemapTextureFormat(format));
-	const bool raw_float_atomic = format == Prospero::BufferFormat::k32Float && uint_resource &&
-	                              resource.atomic && !resource.atomic64;
+	// Atomics act on texel bits through an R32_UINT or R64_UINT view of a float image.
+	const bool raw_float_atomic = uint_resource && resource.atomic &&
+	    format == (resource.atomic64 ? Prospero::BufferFormat::k32_32Float
+	                                 : Prospero::BufferFormat::k32Float);
+	const bool narrow_atomic = ShaderRecompiler::IR::AtomicImageBits(format) != 0u &&
+	                           uint_resource && resource.atomic && !resource.atomic64;
 	const bool format_ok =
-	    raw_sint_storage || raw_float_atomic ||
+	    raw_sint_storage || raw_float_atomic || narrow_atomic ||
 	    (numeric_class != Prospero::TextureNumericClass::Unsupported &&
 	     numeric_class != Prospero::TextureNumericClass::Sint &&
 	     uint_resource == (numeric_class == Prospero::TextureNumericClass::Uint) &&
@@ -358,10 +362,11 @@ static vk::Format SampledViewFormat(const GraphicContext& graphics, Prospero::Bu
 }
 
 // Atomics and raw signed stores use unsigned integer views; sRGB images store through UNorm.
-static vk::Format StorageViewFormat(const ShaderRecompiler::IR::ImageResource& resource,
-                                    Prospero::BufferFormat format, vk::Format pixel_format) {
+vk::Format StorageViewFormat(const ShaderRecompiler::IR::ImageResource& resource,
+                             Prospero::BufferFormat format, vk::Format pixel_format) {
 	if (resource.atomic64) return vk::Format::eR64Uint;
-	if (resource.atomic) return vk::Format::eR32Uint;
+	// A narrow atomic image keeps its own view: the shader runs on its R32Uint shadow.
+	if (resource.atomic && resource.atomic_bits == 0u) return vk::Format::eR32Uint;
 	const auto raw_sint_format = ShaderRecompiler::IR::RawSignedStorageFormat(resource, format);
 	if (raw_sint_format != Prospero::BufferFormat::kInvalid) return VulkanFormat(raw_sint_format);
 	return SrgbUnormViewFormat(pixel_format);
@@ -710,6 +715,7 @@ void RenderExecutor::BindRenderTarget(ImageId id) {
 }
 
 void RenderExecutor::ResetBindings() {
+	m_context.GetTextureCache().CommitAtomicShadows();
 	for (const auto id: m_bound_images) {
 		m_context.GetTextureCache().m_slot_images[id].binding = {};
 	}
@@ -905,6 +911,12 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 		auto& binding = images[i];
 		binding.mip_views.clear();
 		const auto& resource = program.info.images[i];
+		const auto acquire_view = [&](const TextureCache::ImageDesc& desc) {
+			return resource.atomic_bits != 0u
+			           ? texture_cache.AcquireAtomicShadow(binding.image_id, desc,
+			                                               resource.atomic_bits)
+			           : texture_cache.FindTexture(binding.image_id, desc);
+		};
 		if (resource.mip_mode == ShaderRecompiler::IR::ImageMipMode::Dynamic) {
 			EXIT_IF(resource.mip_count == 0u ||
 			        resource.mip_count != binding.desc.view_info.level_count);
@@ -915,11 +927,11 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 				desc.view_info.level_count = 1;
 				// The shader selects the mip after applying the guest minimum LOD.
 				desc.view_info.min_lod = 0;
-				binding.mip_views.push_back(texture_cache.FindTexture(binding.image_id, desc));
+				binding.mip_views.push_back(acquire_view(desc));
 			}
 			binding.image_view = binding.mip_views.front();
 		} else {
-			binding.image_view = texture_cache.FindTexture(binding.image_id, binding.desc);
+			binding.image_view = acquire_view(binding.desc);
 		}
 	}
 }

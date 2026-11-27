@@ -170,6 +170,8 @@ struct ImageResource {
 	bool                          written           = false;
 	bool                          atomic            = false;
 	bool                          atomic64          = false;
+	uint8_t                       atomic_bits       = 0; // 8 or 16 when shadowed through R32Uint.
+	bool                          atomic_signed     = false; // A narrow atomic image of a SInt format.
 	bool                          unfiltered_access_only = true;
 	bool                          sample_access_only     = true; // Every use is a sample.
 	bool                          depth_compare     = false;
@@ -194,6 +196,22 @@ RawSignedStorageFormat(const ImageResource& image, Prospero::BufferFormat format
 	if (format == Prospero::BufferFormat::k16SInt && !image.read && !image.atomic)
 		return Prospero::BufferFormat::k16UInt;
 	return Prospero::BufferFormat::kInvalid;
+}
+
+// 8-bit and 16-bit formats that lack native host image atomics and run through an R32Uint shadow.
+[[nodiscard]] constexpr uint8_t AtomicImageBits(Prospero::BufferFormat format) {
+	switch (format) {
+		case Prospero::BufferFormat::k8UInt:
+		case Prospero::BufferFormat::k8SInt:
+		case Prospero::BufferFormat::k8UNorm:
+		case Prospero::BufferFormat::k8SNorm: return 8u;
+		case Prospero::BufferFormat::k16UInt:
+		case Prospero::BufferFormat::k16SInt:
+		case Prospero::BufferFormat::k16UNorm:
+		case Prospero::BufferFormat::k16SNorm:
+		case Prospero::BufferFormat::k16Float: return 16u;
+		default: return 0u;
+	}
 }
 
 // A raw load of a kDepth k16UInt T# reads a D16 surface's codes. Vulkan cannot view D16 as

@@ -49,6 +49,8 @@ struct ResourceSpecialization {
 		bool                          skip_degamma               = false;
 		bool                          fmask                      = false;
 		bool                          heap                       = false;
+		uint8_t                       atomic_bits                = 0;
+		bool                          atomic_signed              = false;
 		bool                          operator==(const Image&) const = default;
 	};
 

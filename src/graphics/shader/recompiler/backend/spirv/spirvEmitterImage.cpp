@@ -1144,14 +1144,110 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 			                                     ImageDescriptorPointer(state, mem.resource),
 			                                     CoordU32(ctx, mem, *address, dimension),
 			                                     ConstantU32(state, 0));
-			           if (op == IR::ValueOpcode::ImageAtomicFMin32 ||
-			               op == IR::ValueOpcode::ImageAtomicFMax32) {
+			           const bool float_minmax = op == IR::ValueOpcode::ImageAtomicFMin32 ||
+			                                     op == IR::ValueOpcode::ImageAtomicFMax32;
+			           // Narrow images run float min/max on the texel's own width below.
+			           if (float_minmax && image.atomic_bits == 0u) {
 				           return AtomicUpdate(state, pointer, IR::ResourceKind::Image,
 				                               [&](uint32_t old) {
 					                               return EmitFloatAtomicReplacement(
 					                                   state, old, ctx.Arg(inst, 2),
 					                                   op == IR::ValueOpcode::ImageAtomicFMax32);
 				                               });
+			           }
+			           if (image.atomic_bits == 8u || image.atomic_bits == 16u) {
+				           const uint32_t bits = image.atomic_bits;
+				           const auto     mask = ConstantU32(state, (1u << bits) - 1u);
+				           const auto     u32  = TypeU32(state);
+				           const auto     sext = [&](uint32_t v) {
+					           const auto e = state.builder.AllocateId();
+					           state.builder.AddFunction(spv::OpBitFieldSExtract, u32, e, v,
+					                                     ConstantU32(state, 0u),
+					                                     ConstantU32(state, bits));
+					           return e;
+				           };
+				           const auto old = AtomicUpdate(
+				               state, pointer, IR::ResourceKind::Image, [&](uint32_t current) {
+					               const auto cur = Binary(state, spv::OpBitwiseAnd, u32, current, mask);
+					               const auto arg = Binary(
+					                   state, spv::OpBitwiseAnd, u32,
+					                   float_minmax ? ctx.Arg(inst, 2) : ctx.Arg(inst, inst.NumArgs() - 2),
+					                   mask);
+					               uint32_t next = cur;
+					               switch (op) {
+						               case IR::ValueOpcode::ImageAtomicFMin32:
+						               case IR::ValueOpcode::ImageAtomicFMax32: {
+							               if (bits != 16u) {
+								               ctx.Fail(inst, "float atomic on an 8-bit image");
+								               break;
+							               }
+							               // Compare as half floats: both widen exactly to f32, and the
+							               // f32 rule picks one of its operands, so the half bits of the
+							               // operand it picks are stored.
+							               const auto cur_f32 =
+							                   EmitBitcastF32ToU32(state, EmitF16BitsToF32(state, cur));
+							               const auto arg_f32 =
+							                   EmitBitcastF32ToU32(state, EmitF16BitsToF32(state, arg));
+							               const auto picked = EmitFloatAtomicReplacement(
+							                   state, cur_f32, arg_f32,
+							                   op == IR::ValueOpcode::ImageAtomicFMax32);
+							               next = Select(state, u32,
+							                             Binary(state, spv::OpIEqual, TypeBool(state),
+							                                    picked, arg_f32),
+							                             arg, cur);
+							               break;
+						               }
+						               case IR::ValueOpcode::ImageAtomicCompareSwap32: {
+							               const auto desired = Binary(
+							                   state, spv::OpBitwiseAnd, u32,
+							                   ctx.Arg(inst, inst.NumArgs() - 3), mask);
+							               const auto eq =
+							                   Binary(state, spv::OpIEqual, TypeBool(state), cur, arg);
+							               next = Select(state, u32, eq, desired, cur);
+							               break;
+						               }
+						               case IR::ValueOpcode::ImageAtomicSwap32: next = arg; break;
+						               case IR::ValueOpcode::ImageAtomicIAdd32:
+							               next = Binary(state, spv::OpIAdd, u32, cur, arg);
+							               break;
+						               case IR::ValueOpcode::ImageAtomicSMin32:
+							               next = EmitGlsl<GLSLstd450SMin, IR::Type::U32>(
+							                   state, sext(cur), sext(arg));
+							               break;
+						               case IR::ValueOpcode::ImageAtomicSMax32:
+							               next = EmitGlsl<GLSLstd450SMax, IR::Type::U32>(
+							                   state, sext(cur), sext(arg));
+							               break;
+						               case IR::ValueOpcode::ImageAtomicUMin32:
+							               next = EmitGlsl<GLSLstd450UMin, IR::Type::U32>(state, cur, arg);
+							               break;
+						               case IR::ValueOpcode::ImageAtomicUMax32:
+							               next = EmitGlsl<GLSLstd450UMax, IR::Type::U32>(state, cur, arg);
+							               break;
+						               case IR::ValueOpcode::ImageAtomicAnd32:
+							               next = Binary(state, spv::OpBitwiseAnd, u32, cur, arg);
+							               break;
+						               case IR::ValueOpcode::ImageAtomicOr32:
+							               next = Binary(state, spv::OpBitwiseOr, u32, cur, arg);
+							               break;
+						               case IR::ValueOpcode::ImageAtomicXor32:
+							               next = Binary(state, spv::OpBitwiseXor, u32, cur, arg);
+							               break;
+						               default: ctx.Fail(inst, "unsupported narrow image atomic"); break;
+					               }
+					               // Bits 16..31 of a shadow texel keep the value it had when the
+					               // shadow was filled; the write-back compares against them.
+					               return Binary(state, spv::OpBitwiseOr, u32,
+					                             Binary(state, spv::OpBitwiseAnd, u32, current,
+					                                    ConstantU32(state, 0xffff0000u)),
+					                             Binary(state, spv::OpBitwiseAnd, u32, next, mask));
+				               });
+				           // The pre-op value returns as the texel reads: signed integer formats
+				           // sign-extend, as their loads through an R8/R16 SINT view do.
+				           if (image.atomic_signed) {
+					           return sext(old);
+				           }
+				           return Binary(state, spv::OpBitwiseAnd, u32, old, mask);
 			           }
 			           const auto old = EmitAtomicOperation(ctx, inst, pointer, spv::ScopeDevice);
 			           EmitAtomicMemoryBarrier(state, IR::ResourceKind::Image);

@@ -730,12 +730,99 @@ uint64_t Image::HashGuestEdges() const {
 
 Image::~Image() {
 	KYTY_PROFILER_FUNCTION();
+	for (const auto& cached: atomic_shadow_views) {
+		m_graphics.device.destroyImageView(cached.view, nullptr);
+	}
+	if (atomic_shadow.image != nullptr) {
+		m_graphics.DeleteImage(atomic_shadow);
+	}
 	for (const auto& cached: views) {
 		m_graphics.device.destroyImageView(cached.view, nullptr);
 	}
 	if (backing.image != nullptr) {
 		m_graphics.DeleteImage(backing);
 	}
+}
+
+void Image::EnsureAtomicShadow() {
+	if (atomic_shadow.image != nullptr) {
+		return;
+	}
+	EXIT_IF(backing.image == nullptr || backing.samples != 1);
+	vk::ImageCreateInfo create {};
+	create.usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferSrc |
+	               vk::ImageUsageFlagBits::eTransferDst;
+	create.flags = vk::ImageCreateFlagBits::eMutableFormat;
+	if (info.IsVolume()) {
+		create.flags |= vk::ImageCreateFlagBits::e2DArrayCompatible;
+	}
+	create.imageType     = backing.image_type;
+	create.extent        = backing.extent;
+	create.mipLevels     = backing.mip_levels;
+	create.arrayLayers   = backing.layers;
+	create.format        = vk::Format::eR32Uint;
+	create.tiling        = vk::ImageTiling::eOptimal;
+	create.initialLayout = vk::ImageLayout::eUndefined;
+	create.samples       = vk::SampleCountFlagBits::e1;
+	if (!m_graphics.CreateImage(create, atomic_shadow)) {
+		EXIT("failed to create atomic shadow image: extent=%ux%ux%u layers=%u levels=%u\n",
+		     create.extent.width, create.extent.height, create.extent.depth, create.arrayLayers,
+		     create.mipLevels);
+	}
+}
+
+vk::ImageView Image::FindAtomicShadowView(const ImageViewInfo& view_info) {
+	EXIT_IF(atomic_shadow.image == nullptr);
+	auto normalized    = view_info;
+	normalized.format  = vk::Format::eR32Uint;
+	normalized.aspect  = vk::ImageAspectFlagBits::eColor;
+	normalized.usage   = vk::ImageUsageFlagBits::eStorage;
+	normalized.mapping = {};
+	normalized.min_lod = 0;
+	for (const auto& cached: atomic_shadow_views) {
+		if (cached.info == normalized) {
+			return cached.view;
+		}
+	}
+	vk::ImageViewCreateInfo create {};
+	create.image            = atomic_shadow.image;
+	create.viewType         = normalized.type;
+	create.format           = vk::Format::eR32Uint;
+	create.subresourceRange = {vk::ImageAspectFlagBits::eColor, normalized.base_level,
+	                           normalized.level_count, normalized.base_layer,
+	                           normalized.layer_count};
+	vk::ImageView view = nullptr;
+	RequireVulkanSuccess(m_graphics.device.createImageView(&create, nullptr, &view),
+	                     "create atomic shadow image view");
+	atomic_shadow_views.push_back({normalized, view});
+	return view;
+}
+
+void Image::TransitAtomicShadow(vk::ImageLayout destination_layout,
+                                vk::AccessFlags2 destination_access,
+                                vk::PipelineStageFlags2 destination_stage,
+                                vk::CommandBuffer command_buffer) {
+	EXIT_IF(atomic_shadow.image == nullptr);
+	vk::ImageMemoryBarrier2 barrier {};
+	barrier.srcStageMask                    = atomic_shadow.state.pl_stage;
+	barrier.srcAccessMask                   = atomic_shadow.state.access_mask;
+	barrier.dstStageMask                    = destination_stage;
+	barrier.dstAccessMask                   = destination_access;
+	barrier.oldLayout                       = atomic_shadow.state.layout;
+	barrier.newLayout                       = destination_layout;
+	barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+	barrier.image                           = atomic_shadow.image;
+	barrier.subresourceRange.aspectMask     = vk::ImageAspectFlagBits::eColor;
+	barrier.subresourceRange.baseMipLevel   = 0;
+	barrier.subresourceRange.levelCount     = VK_REMAINING_MIP_LEVELS;
+	barrier.subresourceRange.baseArrayLayer = 0;
+	barrier.subresourceRange.layerCount     = VK_REMAINING_ARRAY_LAYERS;
+	vk::DependencyInfo dependency {};
+	dependency.imageMemoryBarrierCount = 1;
+	dependency.pImageMemoryBarriers    = &barrier;
+	command_buffer.pipelineBarrier2(dependency);
+	atomic_shadow.state = {destination_stage, destination_access, destination_layout};
 }
 
 } // namespace Libs::Graphics

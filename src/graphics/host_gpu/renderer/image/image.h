@@ -52,6 +52,11 @@ public:
 	KYTY_CLASS_NO_COPY(Image);
 
 	[[nodiscard]] vk::ImageView FindView(const ImageViewInfo& view_info);
+	void                        EnsureAtomicShadow();
+	[[nodiscard]] vk::ImageView FindAtomicShadowView(const ImageViewInfo& view_info);
+	void TransitAtomicShadow(vk::ImageLayout destination_layout, vk::AccessFlags2 destination_access,
+	                         vk::PipelineStageFlags2 destination_stage,
+	                         vk::CommandBuffer       command_buffer);
 	using Barriers = std::vector<vk::ImageMemoryBarrier2>;
 	[[nodiscard]] Barriers GetBarriers(vk::ImageLayout                      destination_layout,
 	                                   vk::AccessFlags2                     destination_access,
@@ -142,8 +147,10 @@ public:
 	// Unique per image, unlike ImageId: freed slots are reused.
 	const uint64_t   serial = serials.fetch_add(1u, std::memory_order_relaxed) + 1u;
 	ImageInfo        info;
-	VulkanImage      backing;
+	VulkanImage                  backing;
 	std::vector<CachedImageView> views;
+	VulkanImage                  atomic_shadow;
+	std::vector<CachedImageView> atomic_shadow_views;
 	ImageUsage       usage;
 	ImageBinding     binding;
 	bool             registered     = false;

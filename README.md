@@ -60,7 +60,7 @@ Known state:
   skipped by a temporary workaround, which is the main reason the image is incomplete
   ([#2](https://github.com/wololo-wololo/VIcky-Blue/issues/2), [#3](https://github.com/wololo-wololo/VIcky-Blue/issues/3), [#15](https://github.com/wololo-wololo/VIcky-Blue/issues/15)). The failures seen are GPU-selected buffer
   descriptors, indirect buffer tables over the 65536-row limit, and atomic image operations on
-  32_32Float and other non-32-bit-integer images.
+  32_32Float and other non-32-bit-integer images (the last now specialize, see below).
   - GPU-selected descriptors read with typed (`tbuffer_load_format_x/xy/xyz/xyzw`) loads now
     translate. In a boot to the intro the number of distinct skipped shaders went from 231 to
     26 (4 resource tracking failures, 22 specialization failures). What is left on the tracking
@@ -88,6 +88,14 @@ Known state:
     with these changes stayed in the intro for eight minutes without a guest fault; an earlier
     version of the byte-bounds change let 2- and 4-byte formats address unaligned words and ended
     the title with an audio decoder fault after two to three minutes.
+  - Image atomics on 8- and 16-bit images and 64-bit atomics on 32_32Float images now specialize
+    ([#23](https://github.com/wololo-wololo/VIcky-Blue/issues/23), [#33](https://github.com/wololo-wololo/VIcky-Blue/issues/33)).
+    The 8- and 16-bit images run their atomics on an R32_UINT shadow image that is filled before
+    each draw or dispatch and written back after it; this costs two extra compute copies per such
+    draw. A run into the intro no longer reports an "atomic image descriptor ... uses unsupported
+    format" skip. Multisampled 8- and 16-bit atomic images are still skipped. The "resource
+    specialization failed" skip stays a non-fatal workaround: the indirect formatted store
+    failures of [#3](https://github.com/wololo-wololo/VIcky-Blue/issues/3) still reach it.
 - Two system library functions the title calls are not implemented yet
   ([#5](https://github.com/wololo-wololo/VIcky-Blue/issues/5), [#6](https://github.com/wololo-wololo/VIcky-Blue/issues/6)).
 - The title needs `KYTY_LARGE_MEMORY=1` set to get enough guest memory ([#9](https://github.com/wololo-wololo/VIcky-Blue/issues/9)).

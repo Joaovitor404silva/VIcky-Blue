@@ -4,6 +4,7 @@
 #include "common/common.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
+#include <array>
 #include <compare>
 #include <vector>
 
@@ -23,6 +24,8 @@ public:
 	KYTY_CLASS_NO_COPY(BlitHelper);
 
 	void ReinterpretColorAsMsDepth(Image& source, Image& destination);
+	void CopyAtomicShadow(vk::ImageView source, vk::ImageView destination, vk::Extent3D extent,
+	                      uint32_t bits, bool to_shadow, bool is_3d);
 
 private:
 	struct PipelineKey {
@@ -38,6 +41,7 @@ private:
 	};
 
 	[[nodiscard]] vk::Pipeline GetPipeline(PipelineKey key);
+	[[nodiscard]] vk::Pipeline GetAtomicShadowPipeline(uint32_t bits, bool to_shadow, bool is_3d);
 
 	GraphicContext&         m_graphics;
 	CommandScheduler&       m_scheduler;
@@ -46,6 +50,9 @@ private:
 	vk::ShaderModule        m_vertex_shader     = nullptr;
 	vk::ShaderModule        m_fragment_shader   = nullptr;
 	std::vector<Pipeline>   m_pipelines;
+	vk::DescriptorSetLayout          m_atomic_shadow_descriptor_layout = nullptr;
+	vk::PipelineLayout               m_atomic_shadow_pipeline_layout   = nullptr;
+	std::array<vk::Pipeline, 8>      m_atomic_shadow_pipelines {};
 };
 
 } // namespace Libs::Graphics

@@ -1322,7 +1322,8 @@ void TestSignedStorageSpecialization() {
           "signed raw storage view accepted a non-atomic read/write image");
     image.atomic = true;
     Check((RawSignedStorageFormat(image, format) != F::kInvalid) == (format == F::k32SInt) &&
-              MaterializeResources(plan, runtime, snapshot, specialization) == (format == F::k32SInt),
+              MaterializeResources(plan, runtime, snapshot, specialization) &&
+              specialization.images[0].atomic_bits == (format == F::k32SInt ? 0u : format == F::k8SInt ? 8u : 16u),
           "signed storage conversion changed atomic format eligibility");
     image.atomic64 = true;
     Check(RawSignedStorageFormat(image, format) == F::kInvalid &&
@@ -1397,6 +1398,76 @@ void TestUnreachedImageIgnoresSharedDescriptor(bool atomic64) {
   data[1] = 1u;
   Check(!MaterializeResources(plan, runtime, snapshot, specialization),
         "reached atomic image accepted a format its width rejects");
+  // Atomics operate on texel bits, so float images of the atomic's width are accepted too.
+  for (const auto format : {BufferFormat::k32UInt, BufferFormat::k32Float, BufferFormat::k32_32UInt,
+                            BufferFormat::k32_32Float}) {
+    const bool wide = format == BufferFormat::k32_32UInt || format == BufferFormat::k32_32Float;
+    data[0] = uint32_t(format) << 20u;
+    Check(MaterializeResources(plan, runtime, snapshot, specialization) == (wide == atomic64),
+          "reached atomic image rejected a format of its width or accepted another width");
+  }
+  // 8-bit and 16-bit formats are accepted for 32-bit atomics (shadowed through R32Uint) and
+  // rejected for 64-bit atomics. k8SInt is left out: images 0 and 2 share this descriptor as
+  // write-only storage, which has no 8-bit signed view (signed atomics are covered elsewhere).
+  for (const auto format : {BufferFormat::k8UInt, BufferFormat::k8UNorm, BufferFormat::k16UInt,
+                            BufferFormat::k16SInt, BufferFormat::k16Float}) {
+    const uint8_t expected_bits =
+        (format == BufferFormat::k8UInt || format == BufferFormat::k8UNorm) ? 8u : 16u;
+    data[0] = uint32_t(format) << 20u;
+    const bool ok = MaterializeResources(plan, runtime, snapshot, specialization);
+    Check(ok == !atomic64 && (!ok || specialization.images[1].atomic_bits == expected_bits),
+          "narrow atomic image format specialization mismatch");
+  }
+}
+
+// The R32_UINT shadow that narrow image atomics run on is single-sampled, so a multisampled 8- or
+// 16-bit atomic image must fail specialization (and be skipped) instead of reaching the renderer.
+void TestMultisampledNarrowAtomicImageRejected() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  using Libs::Graphics::ShaderRecompiler::CFG::TerminatorKind;
+  using Libs::Graphics::Prospero::BufferFormat;
+  using Libs::Graphics::Prospero::ImageType;
+  using Libs::Graphics::ShaderRecompiler::Decoder::ImageDimension;
+  for (const bool msaa : {false, true}) {
+    Program program;
+    program.stage = Libs::Graphics::ShaderType::Compute;
+    program.srt_plan_complete = program.resource_tracking_complete = true;
+    program.user_data_count = 1u;
+    auto &entry = AddValueBlock(program);
+    DescriptorSource source;
+    source.dword_count = 8u;
+    source.dwords.fill(Value(0u));
+    source.dwords[0] = Value(0x100u);
+    source.dwords[1] = Value(&entry.AppendNewInst(ValueOpcode::GetUserData, {Value(ScalarReg(0))}));
+    // A multisampled T# keeps log2(samples) in last_level and repeats it in max_mip.
+    source.dwords[3] = Value((uint32_t(msaa ? ImageType::kColor2DMsaa : ImageType::kColor2D) << 28u) |
+                             (msaa ? 2u << 16u : 0u));
+    source.dwords[5] = Value(msaa ? 2u << 4u : 0u);
+    program.descriptor_sources.push_back(source);
+    program.info.images.push_back({.source = 0u, .resource_class = ImageResourceClass::Storage,
+        .dimension = msaa ? ImageDimension::Dim2DMsaa : ImageDimension::Dim2D, .written = true,
+        .atomic = true});
+    program.memory_info.push_back({.kind = ResourceKind::Image, .resource = 0u});
+    entry.AppendNewInst(ValueOpcode::ImageAtomicUMax32, {Value(0u), Value(0u), Value(0u), Value(true)})
+        .SetFlags(MemoryFlags{.index = 0});
+    entry.terminator.kind = TerminatorKind::Return;
+    auto plan = Extract(program);
+    std::array<uint32_t, 1> data{};
+    const SrtRuntime runtime{.user_data = data};
+    ResourceSnapshot snapshot;
+    ResourceSpecialization specialization;
+    data[0] = uint32_t(BufferFormat::k32UInt) << 20u;
+    Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+              (snapshot.images[0].dwords[3] >> 28u) == uint32_t(msaa ? ImageType::kColor2DMsaa : ImageType::kColor2D),
+          "32-bit atomic image fixture did not materialize as a valid T#");
+    for (const auto format : {BufferFormat::k8UInt, BufferFormat::k16UInt, BufferFormat::k16Float}) {
+      data[0] = uint32_t(format) << 20u;
+      const bool ok = MaterializeResources(plan, runtime, snapshot, specialization);
+      Check(ok == !msaa && (!ok || specialization.images[0].atomic_bits != 0u),
+            msaa ? "multisampled narrow atomic image was accepted without a shadow"
+                 : "single-sampled narrow atomic image was rejected");
+    }
+  }
 }
 
 void TestIndirectImageSamplerClasses(bool mixed) {
@@ -1533,6 +1604,7 @@ int main() {
   TestStorageFillSwizzle();
   TestSignedStorageSpecialization();
   for (const bool atomic64 : {false, true}) TestUnreachedImageIgnoresSharedDescriptor(atomic64);
+  TestMultisampledNarrowAtomicImageRejected();
   for (const bool mixed : {false, true}) TestIndirectImageSamplerClasses(mixed);
   TestShaderCacheRecords();
   std::puts("ResourceMaterializationTests: all cases passed");

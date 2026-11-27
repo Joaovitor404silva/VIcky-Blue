@@ -1510,6 +1510,103 @@ vk::ImageView TextureCache::FindTexture(ImageId id, const ImageDesc& desc) {
 	return image.FindView(desc.view_info);
 }
 
+vk::ImageView TextureCache::AcquireAtomicShadow(ImageId id, const ImageDesc& desc, uint8_t bits) {
+	EXIT_IF(bits != 8u && bits != 16u);
+	auto raw_desc             = desc;
+	raw_desc.view_info.format = bits == 8u ? vk::Format::eR8Uint : vk::Format::eR16Uint;
+	(void)FindTexture(id, raw_desc);
+	std::scoped_lock lock {m_lock};
+	auto&            image = m_slot_images[id];
+	// A subresource already filled since the last write-back holds the newest values: filling it
+	// again would only repeat the copy and, after a draw, lose that draw's atomics.
+	for (const auto& entry: m_active_atomic_shadows) {
+		if (entry.id == id && entry.bits == bits && entry.view_info == desc.view_info) {
+			return image.FindAtomicShadowView(desc.view_info);
+		}
+	}
+	image.EnsureAtomicShadow();
+	m_scheduler.EndRendering();
+	auto       command = m_scheduler.Current().Handle();
+	const bool is_3d   = image.backing.image_type == vk::ImageType::e3D;
+	// Other bindings of this image in the same draw or dispatch may still write it, so its tracked
+	// access keeps ShaderWrite for the barriers that follow.
+	image.Transit(vk::ImageLayout::eGeneral,
+	              vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite, {}, command);
+	image.TransitAtomicShadow(vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderWrite,
+	                          vk::PipelineStageFlagBits2::eComputeShader, command);
+	const auto& view = desc.view_info;
+	for (uint32_t mip = 0; mip < view.level_count; ++mip) {
+		const uint32_t level = view.base_level + mip;
+		const uint32_t w     = std::max(image.backing.extent.width >> level, 1u);
+		const uint32_t h     = std::max(image.backing.extent.height >> level, 1u);
+		const uint32_t z =
+		    is_3d ? std::max(image.backing.extent.depth >> level, 1u) : view.layer_count;
+		ImageViewInfo copy_view {};
+		copy_view.type        = is_3d ? vk::ImageViewType::e3D : vk::ImageViewType::e2DArray;
+		copy_view.base_level  = level;
+		copy_view.level_count = 1;
+		copy_view.base_layer  = is_3d ? 0u : view.base_layer;
+		copy_view.layer_count = is_3d ? 1u : view.layer_count;
+		copy_view.aspect      = vk::ImageAspectFlagBits::eColor;
+		copy_view.usage       = vk::ImageUsageFlagBits::eStorage;
+		copy_view.format      = bits == 8u ? vk::Format::eR8Uint : vk::Format::eR16Uint;
+		const auto src_view   = image.FindView(copy_view);
+		const auto dst_view   = image.FindAtomicShadowView(copy_view);
+		m_blit_helper.CopyAtomicShadow(src_view, dst_view, {w, h, z}, bits, true, is_3d);
+	}
+	image.TransitAtomicShadow(
+	    vk::ImageLayout::eGeneral,
+	    vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite,
+	    vk::PipelineStageFlagBits2::eAllGraphics | vk::PipelineStageFlagBits2::eComputeShader,
+	    command);
+	m_active_atomic_shadows.push_back({id, view, bits});
+	return image.FindAtomicShadowView(view);
+}
+
+void TextureCache::CommitAtomicShadows() {
+	// AcquireAtomicShadow appends under m_lock, so the list is read and swapped under it too.
+	std::scoped_lock lock {m_lock};
+	if (m_active_atomic_shadows.empty()) {
+		return;
+	}
+	const auto active = std::exchange(m_active_atomic_shadows, {});
+	m_scheduler.EndRendering();
+	auto command = m_scheduler.Current().Handle();
+	for (const auto& entry: active) {
+		auto* image = m_slot_images.try_get(entry.id);
+		if (image == nullptr || !image->registered || image->atomic_shadow.image == nullptr) {
+			continue;
+		}
+		const bool is_3d = image->backing.image_type == vk::ImageType::e3D;
+		image->TransitAtomicShadow(vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderRead,
+		                           vk::PipelineStageFlagBits2::eComputeShader, command);
+		image->Transit(vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderWrite, {}, command);
+		const auto& view = entry.view_info;
+		for (uint32_t mip = 0; mip < view.level_count; ++mip) {
+			const uint32_t level = view.base_level + mip;
+			const uint32_t w     = std::max(image->backing.extent.width >> level, 1u);
+			const uint32_t h     = std::max(image->backing.extent.height >> level, 1u);
+			const uint32_t z =
+			    is_3d ? std::max(image->backing.extent.depth >> level, 1u) : view.layer_count;
+			ImageViewInfo copy_view {};
+			copy_view.type        = is_3d ? vk::ImageViewType::e3D : vk::ImageViewType::e2DArray;
+			copy_view.base_level  = level;
+			copy_view.level_count = 1;
+			copy_view.base_layer  = is_3d ? 0u : view.base_layer;
+			copy_view.layer_count = is_3d ? 1u : view.layer_count;
+			copy_view.aspect      = vk::ImageAspectFlagBits::eColor;
+			copy_view.usage       = vk::ImageUsageFlagBits::eStorage;
+			copy_view.format      = entry.bits == 8u ? vk::Format::eR8Uint : vk::Format::eR16Uint;
+			const auto src_view   = image->FindAtomicShadowView(copy_view);
+			const auto dst_view   = image->FindView(copy_view);
+			m_blit_helper.CopyAtomicShadow(src_view, dst_view, {w, h, z}, entry.bits, false, is_3d);
+		}
+		image->Transit(vk::ImageLayout::eGeneral,
+		               vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite, {},
+		               command);
+	}
+}
+
 vk::ImageView TextureCache::FindRenderTarget(ImageId id, const ImageDesc& desc) {
 	std::scoped_lock lock {m_lock};
 	auto&            image = m_slot_images[id];
