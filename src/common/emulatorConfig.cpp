@@ -181,6 +181,10 @@ bool BuildShaderCache() {
 	return g_config->build_shader_cache;
 }
 
+std::filesystem::path PretranslateShadersPath() {
+	return g_config->pretranslate_shaders;
+}
+
 LogDirection GetShaderLogDirection() {
 	return g_config->shader_log_direction;
 }

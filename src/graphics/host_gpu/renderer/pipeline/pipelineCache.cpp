@@ -5,6 +5,7 @@
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
+#include "common/parallelFor.h"
 #include "common/profiler.h"
 #include "common/threads.h"
 #include "graphics/guest_gpu/gpu_format.h"
@@ -13,6 +14,7 @@
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
+#include "graphics/host_gpu/renderer/pipeline/shaderPack.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
@@ -35,6 +37,7 @@
 #include <ranges>
 #include <span>
 #include <spirv-tools/libspirv.hpp>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 #include <xxhash.h>
@@ -181,6 +184,43 @@ void ValidateShaderSpirv(const char* stage, uint64_t shader_hash,
 	LOGF("%s\n", text.c_str());
 	EXIT("ShaderRecompiler %s SPIR-V validation failed hash=0x%016" PRIx64 ":\n%s", stage,
 	     shader_hash, messages.c_str());
+}
+
+std::vector<uint32_t> BuildPretranslatedState(const ShaderComputeInputInfo& info) {
+	return {
+	    info.wave_size,
+	    info.float_mode,
+	    info.scratch_size_dwords,
+	    info.host_subgroup_size,
+	    info.threads_num[0],
+	    info.threads_num[1],
+	    info.threads_num[2],
+	    static_cast<uint32_t>(info.dispatch_thread_dimensions),
+	    static_cast<uint32_t>(info.thread_ids_num),
+	    static_cast<uint32_t>(info.workgroup_register),
+	    static_cast<uint32_t>(info.group_id[0]),
+	    static_cast<uint32_t>(info.group_id[1]),
+	    static_cast<uint32_t>(info.group_id[2]),
+	    static_cast<uint32_t>(info.tg_size_en),
+	};
+}
+
+std::vector<uint32_t> BuildPretranslatedState(const ShaderPixelInputInfo& info) {
+	return {
+	    info.wave_size,
+	    info.float_mode,
+	    info.scratch_size_dwords,
+	    info.ps_system_input_base,
+	    info.ps_perspective_center_vgpr,
+	    info.ps_perspective_sample_vgpr,
+	    info.ps_perspective_centroid_vgpr,
+	    static_cast<uint32_t>(info.ps_pos_x),
+	    static_cast<uint32_t>(info.ps_pos_y),
+	    static_cast<uint32_t>(info.ps_pos_z),
+	    static_cast<uint32_t>(info.ps_pos_w),
+	    static_cast<uint32_t>(info.ps_front_face),
+	    static_cast<uint32_t>(info.ps_ancillary),
+	};
 }
 
 } // namespace
@@ -408,43 +448,64 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	options.back_code       = params.back_code;
 	options.dump_ir         = Config::GetShaderLogDirection() != Config::LogDirection::Silent;
 	options.emit_debug_info = Config::GraphicsDebugDumpEnabled();
-	ShaderRecompiler::ShaderSource source;
-	if (entry == m_program_cache.end()) {
-		DumpShader(params.code, fmt::format("original/{}_{:016x}.bin",
-		                                    ShaderRecompiler::StageName(options.stage), params.hash));
-		source = ShaderRecompiler::PrepareShaderSource(params.code, options);
-		if (source.unsupported_call_pc != UINT32_MAX) {
-			PipelineCacheLog("!!! TEMPORARY COMPUTE DISPATCH SKIP !!! shader=0x{:016x} pc=0x{:08x} "
-			                 "reason=unsupported GPU-selected callable target; rendering is incomplete",
-			                 params.hash, source.unsupported_call_pc);
-			m_program_cache.emplace(m_lookup_key, Program {.skip_dispatch = true});
-			return nullptr;
+	ShaderRecompiler::ShaderSource    source;
+	ShaderRecompiler::TranslateResult translated;
+	bool                              used_pretranslated = false;
+	if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo> ||
+	              std::is_same_v<InputInfo, ShaderPixelInputInfo>) {
+		if (entry == m_program_cache.end() && params.back_code.empty() && !options.dump_ir &&
+		    !m_pretranslated.empty()) {
+			const PretranslatedKey pre_key {
+			    .stage           = options.stage,
+			    .hash            = params.hash,
+			    .user_data_base  = options.user_data_base,
+			    .user_data_count = params.user_data_count,
+			    .translate_state = BuildPretranslatedState(input_info),
+			};
+			if (const auto found = m_pretranslated.find(pre_key); found != m_pretranslated.end()) {
+				translated = std::move(*found->second);
+				m_pretranslated.erase(found);
+				used_pretranslated = true;
+			}
 		}
 	}
-	auto* current = entry == m_program_cache.end() ? &source : entry->second.call_source.get();
-	ShaderRecompiler::TranslateResult translated;
-	try {
-		if (current != nullptr) {
-			if (!current->calls.empty()) {
-				if (entry == m_program_cache.end()) ShaderRecompiler::RefreshShaderSource(*current, runtime);
-				translated = ShaderRecompiler::TranslateProgram(current->linked->decoded, options);
-				translated.program.source_reads = current->reads;
-			} else {
-				translated = ShaderRecompiler::TranslateProgram(current->decoded, options);
-			}
-		} else {
-			translated = ShaderRecompiler::TranslateProgram(params.code, options);
-		}
-	} catch (const ShaderRecompiler::IR::UnsupportedComputeShader&) {
-		PipelineCacheLog("!!! TEMPORARY COMPUTE DISPATCH SKIP !!! shader=0x{:016x} "
-		                 "reason=resource tracking failed; rendering is incomplete",
-		                 params.hash);
+	if (!used_pretranslated) {
 		if (entry == m_program_cache.end()) {
-			m_program_cache.emplace(m_lookup_key, Program {.skip_dispatch = true});
-		} else {
-			entry->second.skip_dispatch = true;
+			DumpShader(params.code, fmt::format("original/{}_{:016x}.bin",
+			                                    ShaderRecompiler::StageName(options.stage), params.hash));
+			source = ShaderRecompiler::PrepareShaderSource(params.code, options);
+			if (source.unsupported_call_pc != UINT32_MAX) {
+				PipelineCacheLog("!!! TEMPORARY COMPUTE DISPATCH SKIP !!! shader=0x{:016x} pc=0x{:08x} "
+				                 "reason=unsupported GPU-selected callable target; rendering is incomplete",
+				                 params.hash, source.unsupported_call_pc);
+				m_program_cache.emplace(m_lookup_key, Program {.skip_dispatch = true});
+				return nullptr;
+			}
 		}
-		return nullptr;
+		auto* current = entry == m_program_cache.end() ? &source : entry->second.call_source.get();
+		try {
+			if (current != nullptr) {
+				if (!current->calls.empty()) {
+					if (entry == m_program_cache.end()) ShaderRecompiler::RefreshShaderSource(*current, runtime);
+					translated = ShaderRecompiler::TranslateProgram(current->linked->decoded, options);
+					translated.program.source_reads = current->reads;
+				} else {
+					translated = ShaderRecompiler::TranslateProgram(current->decoded, options);
+				}
+			} else {
+				translated = ShaderRecompiler::TranslateProgram(params.code, options);
+			}
+		} catch (const ShaderRecompiler::IR::UnsupportedComputeShader&) {
+			PipelineCacheLog("!!! TEMPORARY COMPUTE DISPATCH SKIP !!! shader=0x{:016x} "
+			                 "reason=resource tracking failed; rendering is incomplete",
+			                 params.hash);
+			if (entry == m_program_cache.end()) {
+				m_program_cache.emplace(m_lookup_key, Program {.skip_dispatch = true});
+			} else {
+				entry->second.skip_dispatch = true;
+			}
+			return nullptr;
+		}
 	}
 	if (entry == m_program_cache.end()) {
 		auto retained = !source.calls.empty()
@@ -534,6 +595,133 @@ PipelineCache::PipelineCache(GraphicContext&                         graphics,
 	}
 	InitializeDriverCache();
 	WarmUp(shader_store);
+	PretranslatePack(Config::PretranslateShadersPath());
+}
+
+void PipelineCache::PretranslatePack(const std::filesystem::path& path) {
+	if (path.empty()) {
+		return;
+	}
+	const auto start = std::chrono::steady_clock::now();
+	Common::File file;
+	if (!file.Open(path, Common::File::Mode::Read)) {
+		PipelineCacheLog("Shader pack: failed to open {}", Common::PathToString(path));
+		return;
+	}
+	const auto size = file.Size();
+	if (size == 0u || size > std::numeric_limits<uint32_t>::max()) {
+		return;
+	}
+	std::vector<uint8_t> bytes(size);
+	uint32_t             read = 0;
+	file.Read(bytes.data(), static_cast<uint32_t>(size), &read);
+	file.Close();
+	if (read != size) {
+		PipelineCacheLog("Shader pack: short read from {}", Common::PathToString(path));
+		return;
+	}
+
+	const auto records = ScanShaderPack(bytes);
+	if (records.empty()) {
+		return;
+	}
+
+	std::unordered_set<uint64_t> cached_hashes;
+	cached_hashes.reserve(m_program_cache.size());
+	for (const auto& [key, _]: m_program_cache) {
+		cached_hashes.insert(key.hash);
+	}
+
+	std::vector<size_t> candidates;
+	candidates.reserve(records.size());
+	for (size_t i = 0; i < records.size(); i++) {
+		const auto& rec = records[i];
+		if ((rec.type == Prospero::ShaderBinaryType::kCs ||
+		     rec.type == Prospero::ShaderBinaryType::kPs) &&
+		    !cached_hashes.contains(rec.hash)) {
+			candidates.push_back(i);
+		}
+	}
+
+	struct Output {
+		PretranslatedKey                                   key;
+		std::unique_ptr<ShaderRecompiler::TranslateResult> translated;
+	};
+	std::vector<Output>    outputs(candidates.size());
+	std::atomic<size_t>    skipped = 0;
+	const uint32_t         host_subgroup = m_graphics.subgroup_size;
+
+	Common::ParallelFor(candidates.size(), [&](size_t i) {
+		const auto& rec = records[candidates[i]];
+		try {
+			ShaderRecompiler::CompileOptions options;
+			options.shader_hash     = rec.hash;
+			options.dump_ir         = false;
+			options.emit_debug_info = false;
+			uint32_t user_data_count = 0;
+
+			ShaderComputeInputInfo cs_info {};
+			ShaderPixelInputInfo   ps_info {};
+			PretranslatedKey       key {.hash = rec.hash};
+			if (rec.type == Prospero::ShaderBinaryType::kCs) {
+				if (!ExtractPackComputeInput(rec, host_subgroup, cs_info, user_data_count)) {
+					skipped++;
+					return;
+				}
+				options.stage              = ShaderType::Compute;
+				options.wave_size          = cs_info.wave_size;
+				options.input_info.compute = &cs_info;
+				key.stage                  = ShaderType::Compute;
+				key.user_data_count        = user_data_count;
+				key.translate_state        = BuildPretranslatedState(cs_info);
+			} else {
+				if (!ExtractPackPixelInput(rec, ps_info, user_data_count)) {
+					skipped++;
+					return;
+				}
+				options.stage            = ShaderType::Pixel;
+				options.wave_size        = ps_info.wave_size;
+				options.input_info.pixel = &ps_info;
+				key.stage                = ShaderType::Pixel;
+				key.user_data_count      = user_data_count;
+				key.translate_state      = BuildPretranslatedState(ps_info);
+			}
+
+			const std::vector<uint32_t> user_data(user_data_count);
+			options.user_data = user_data;
+			const auto source = ShaderRecompiler::PrepareShaderSource(rec.code, options);
+			if (source.unsupported_call_pc != UINT32_MAX || !source.calls.empty()) {
+				skipped++;
+				return;
+			}
+			auto translated = ShaderRecompiler::TranslateProgram(source.decoded, options);
+			outputs[i].key  = std::move(key);
+			outputs[i].translated =
+			    std::make_unique<ShaderRecompiler::TranslateResult>(std::move(translated));
+		} catch (...) {
+			skipped++;
+		}
+	});
+
+	size_t cs_count = 0;
+	size_t ps_count = 0;
+	for (auto& out: outputs) {
+		if (!out.translated) {
+			continue;
+		}
+		if (out.key.stage == ShaderType::Compute) {
+			cs_count++;
+		} else {
+			ps_count++;
+		}
+		m_pretranslated.try_emplace(std::move(out.key), std::move(out.translated));
+	}
+	const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+	                            std::chrono::steady_clock::now() - start)
+	                            .count();
+	PipelineCacheLog("Shader pack: pre-translated {} shaders ({} CS, {} PS, {} skipped) from {} in {} ms",
+	                 cs_count + ps_count, cs_count, ps_count, skipped.load(),
+	                 Common::PathToString(path), elapsed_ms);
 }
 
 // A pipeline creation that held the render thread for 100 ms or more, with its stages' hashes.

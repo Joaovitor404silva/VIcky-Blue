@@ -768,6 +768,14 @@ struct PipelineCacheTestAccess {
     cache.StoreLayout(key, layout);
   }
 
+  static void PretranslatePack(PipelineCache &cache, const std::filesystem::path &path) {
+    cache.PretranslatePack(path);
+  }
+
+  static size_t PretranslatedCount(const PipelineCache &cache) {
+    return cache.m_pretranslated.size();
+  }
+
   // Holds the store thread until Save(), which destroying the cache also calls.
   static void HoldStoreUntilExit(PipelineCache &cache) {
     cache.m_store.Post([stop = cache.m_store.m_thread.get_stop_token()] {
@@ -51599,6 +51607,163 @@ void CheckGraphicsPushDataModules(VulkanHarness &vulkan) {
   std::printf("[gpu]     %-32s ok\n", name);
 }
 
+// Pre-translating a shader pack populates m_pretranslated for CS and PS and produces the exact
+// same module ids as translating on demand; mismatched runtime state misses cleanly.
+void CheckShaderPackPretranslate(VulkanHarness &vulkan) {
+  constexpr const char *name = "ShaderPackPretranslate";
+  // Pad to 16-byte multiples so the barefoot footer's aligned program size matches code.size().
+  const std::vector<u32> cs_code{EncodeVop1(0x01, 0, 0), EncodeSopp(0x01), EncodeSopp(0x00),
+                                 EncodeSopp(0x00)};
+  const std::vector<u32> ps_code{EncodeVop1(0x01, 0, 0), EncodeVop1(0x01, 1, 1),
+                                 EncodeVop1(0x01, 2, 2), EncodeVop1(0x01, 3, 3),
+                                 EncodeExp0(0x00, 0xf), EncodeExp1(0, 1, 2, 3), EncodeSopp(0x01),
+                                 EncodeSopp(0x00)};
+
+  auto append_u32 = [](std::vector<uint8_t> &dst, u32 value) {
+    const auto off = dst.size();
+    dst.resize(off + sizeof(value));
+    std::memcpy(dst.data() + off, &value, sizeof(value));
+  };
+  auto append_bytes = [](std::vector<uint8_t> &dst, const void *data, size_t size) {
+    const auto off = dst.size();
+    dst.resize(off + size);
+    std::memcpy(dst.data() + off, data, size);
+  };
+  auto make_record = [&](Prospero::ShaderBinaryType type, const std::vector<u32> &code,
+                         const std::vector<ShaderRegister> &sh_regs,
+                         const std::vector<ShaderRegister> &cx_regs) {
+    std::vector<uint8_t> bin;
+    append_bytes(bin, code.data(), code.size() * sizeof(u32));
+    const auto code_bytes = static_cast<u32>(bin.size());
+    while (bin.size() % 16u != 0u) bin.push_back(0);
+    std::array<u32, 12> footer{};
+    std::memcpy(footer.data(), "barefoot", 8);
+    footer[4] = 1u;
+    footer[5] = code_bytes;
+    append_bytes(bin, footer.data(), sizeof(footer));
+
+    std::vector<uint8_t> hdr_buf(sizeof(Shader), 0);
+    auto set_rel = [&](size_t field_off, size_t target_off) {
+      const auto delta = static_cast<uint64_t>(target_off - field_off);
+      std::memcpy(hdr_buf.data() + field_off, &delta, sizeof(delta));
+    };
+    if (!cx_regs.empty()) {
+      const auto off = hdr_buf.size();
+      append_bytes(hdr_buf, cx_regs.data(), cx_regs.size() * sizeof(ShaderRegister));
+      set_rel(offsetof(Shader, cx_registers), off);
+    }
+    if (!sh_regs.empty()) {
+      const auto off = hdr_buf.size();
+      append_bytes(hdr_buf, sh_regs.data(), sh_regs.size() * sizeof(ShaderRegister));
+      set_rel(offsetof(Shader, sh_registers), off);
+    }
+    Shader hdr{};
+    std::memcpy(&hdr, hdr_buf.data(), sizeof(hdr));
+    hdr.file_header = 0x34333231u;
+    hdr.version = 0x00000018u;
+    hdr.header_size = static_cast<u32>(hdr_buf.size());
+    hdr.shader_size = static_cast<u32>(bin.size());
+    hdr.type = static_cast<uint8_t>(type);
+    hdr.num_cx_registers = static_cast<uint8_t>(cx_regs.size());
+    hdr.num_sh_registers = static_cast<uint8_t>(sh_regs.size());
+    std::memcpy(hdr_buf.data(), &hdr, sizeof(hdr));
+
+    std::vector<uint8_t> rec;
+    append_bytes(rec, "sgaProg\0", 8);
+    append_u32(rec, static_cast<u32>(hdr_buf.size()));
+    append_u32(rec, static_cast<u32>(bin.size()));
+    append_bytes(rec, hdr_buf.data(), hdr_buf.size());
+    append_bytes(rec, bin.data(), bin.size());
+    return rec;
+  };
+
+  const u32 cs_rsrc1 = 0xc0u << Pm4::COMPUTE_PGM_RSRC1_FLOAT_MODE_SHIFT;
+  const u32 cs_rsrc2 = (1u << Pm4::COMPUTE_PGM_RSRC2_USER_SGPR_SHIFT);
+  const auto cs_rec = make_record(Prospero::ShaderBinaryType::kCs, cs_code,
+                                  {{Pm4::COMPUTE_PGM_RSRC1, cs_rsrc1},
+                                   {Pm4::COMPUTE_PGM_RSRC2, cs_rsrc2},
+                                   {Pm4::COMPUTE_NUM_THREAD_X, 64},
+                                   {Pm4::COMPUTE_NUM_THREAD_Y, 1},
+                                   {Pm4::COMPUTE_NUM_THREAD_Z, 1}},
+                                  {});
+  const u32 ps_rsrc1 = 0xc0u << Pm4::SPI_SHADER_PGM_RSRC1_PS_FLOAT_MODE_SHIFT;
+  const u32 ps_rsrc2 = (4u << Pm4::SPI_SHADER_PGM_RSRC2_PS_USER_SGPR_SHIFT);
+  const auto ps_rec = make_record(Prospero::ShaderBinaryType::kPs, ps_code,
+                                  {{Pm4::SPI_SHADER_PGM_RSRC1_PS, ps_rsrc1},
+                                   {Pm4::SPI_SHADER_PGM_RSRC2_PS, ps_rsrc2}},
+                                  {{Pm4::SPI_PS_IN_CONTROL, 0u},
+                                   {Pm4::SPI_PS_INPUT_ENA, 0u},
+                                   {Pm4::SPI_PS_INPUT_ADDR, 0u}});
+
+  std::vector<uint8_t> pack;
+  append_bytes(pack, cs_rec.data(), cs_rec.size());
+  append_bytes(pack, ps_rec.data(), ps_rec.size());
+
+  const auto temp_path =
+      std::filesystem::temp_directory_path() / "kyty_shader_pack_pretranslate_test.bin";
+  {
+    Common::File out;
+    Require(name, "create temp pack", out.Create(temp_path), "failed to create temp pack");
+    out.Write(pack.data(), static_cast<u32>(pack.size()));
+    out.Close();
+  }
+
+  const uint64_t cs_hash = XXH3_64bits(cs_code.data(), cs_code.size() * sizeof(u32));
+  const uint64_t ps_hash = XXH3_64bits(ps_code.data(), ps_code.size() * sizeof(u32));
+  const ShaderParams cs_params{.code = cs_code, .user_data_count = 1, .hash = cs_hash};
+  const ShaderParams ps_params{.code = ps_code, .user_data_count = 4, .hash = ps_hash};
+
+  ShaderComputeInputInfo cs_input{};
+  cs_input.threads_num[0] = 64;
+  cs_input.threads_num[1] = 1;
+  cs_input.threads_num[2] = 1;
+  cs_input.host_subgroup_size = vulkan.RuntimeContext().subgroup_size;
+  cs_input.wave_size = 64;
+  cs_input.float_mode = 0xc0;
+  cs_input.thread_ids_num = 1;
+  cs_input.workgroup_register = 1;
+
+  ShaderPixelInputInfo ps_input{};
+  ps_input.wave_size = 64;
+  ps_input.float_mode = 0xc0;
+
+  PipelineCache baseline(vulkan.RuntimeContext(), nullptr);
+  auto cs_in_base = cs_input;
+  auto ps_in_base = ps_input;
+  const auto *base_cs = PipelineCacheTestAccess::GetProgram(baseline, cs_params, cs_in_base);
+  const auto *base_ps = PipelineCacheTestAccess::GetProgram(baseline, ps_params, ps_in_base);
+  Require(name, "baseline modules", base_cs != nullptr && base_ps != nullptr,
+          "baseline compilation failed");
+
+  PipelineCache pre(vulkan.RuntimeContext(), nullptr);
+  PipelineCacheTestAccess::PretranslatePack(pre, temp_path);
+  std::error_code ec;
+  std::filesystem::remove(temp_path, ec);
+
+  Require(name, "pretranslated count", PipelineCacheTestAccess::PretranslatedCount(pre) == 2u,
+          "expected 2 pretranslated entries (1 CS + 1 PS)");
+
+  // Mismatched wave size must miss cleanly without consuming the wave64 entry.
+  auto cs_in_mismatch = cs_input;
+  cs_in_mismatch.wave_size = 32;
+  const auto *mismatch_cs = PipelineCacheTestAccess::GetProgram(pre, cs_params, cs_in_mismatch);
+  Require(name, "mismatch falls back",
+          mismatch_cs != nullptr && PipelineCacheTestAccess::PretranslatedCount(pre) == 2u,
+          "mismatched runtime state should not consume the pretranslated entry");
+
+  auto cs_in_pre = cs_input;
+  auto ps_in_pre = ps_input;
+  const auto *pre_cs = PipelineCacheTestAccess::GetProgram(pre, cs_params, cs_in_pre);
+  const auto *pre_ps = PipelineCacheTestAccess::GetProgram(pre, ps_params, ps_in_pre);
+  Require(name, "pretranslated consumed",
+          pre_cs != nullptr && pre_ps != nullptr &&
+              PipelineCacheTestAccess::PretranslatedCount(pre) == 0u,
+          "matching CS and PS lookups should consume their pretranslated entries");
+  Require(name, "module id parity", pre_cs->id == base_cs->id && pre_ps->id == base_ps->id,
+          "pretranslated module ids differed from on-demand translation");
+  std::printf("[gpu]     %-32s ok\n", name);
+}
+
 // Vertex formats with the same channel count and type class (Uint, Sint, or any other as
 // Float) share a vertex module; each draw's pipeline holds its own format.
 void CheckVertexFormatModules(VulkanHarness &vulkan) {
@@ -58654,6 +58819,7 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--shader-cache-only") == 0) {
     VulkanHarness vulkan;
     CheckShaderStore(vulkan);
+  CheckShaderPackPretranslate(vulkan);
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--lds-limit-only") == 0) {
@@ -59850,6 +60016,11 @@ int main(int argc, char **argv) {
     RunCase(nullptr, ImageStoreMipSelectsPpsa01340Descriptor());
     return 0;
   }
+  if (argc == 2 && std::strcmp(argv[1], "--shader-pack-only") == 0) {
+    VulkanHarness vulkan;
+    CheckShaderPackPretranslate(vulkan);
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--storage-yzwx-only") == 0) {
     CheckSampledColorViews();
     CheckBasicStorageTextureDescriptor();
@@ -60006,6 +60177,7 @@ int main(int argc, char **argv) {
   CheckGraphicsPushDataModules(vulkan);
   CheckVertexFormatModules(vulkan);
   CheckShaderStore(vulkan);
+  CheckShaderPackPretranslate(vulkan);
   vulkan.CheckOrderedDispatch();
   vulkan.CheckZeroStrideBufferBinding();
   vulkan.CheckNullStorageBufferDescriptor();

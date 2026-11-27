@@ -254,6 +254,21 @@ private:
 		std::size_t operator()(const ProgramKey& key) const { return key.hash; }
 	};
 
+	// Exact inputs TranslateProgram reads for a pre-translated compute or pixel shader.
+	struct PretranslatedKey {
+		ShaderType            stage           = ShaderType::Unknown;
+		uint64_t              hash            = 0;
+		uint32_t              user_data_base  = 0;
+		uint32_t              user_data_count = 0;
+		std::vector<uint32_t> translate_state;
+
+		bool operator==(const PretranslatedKey&) const = default;
+	};
+
+	struct PretranslatedKeyHash {
+		std::size_t operator()(const PretranslatedKey& key) const { return key.hash; }
+	};
+
 	struct GraphicsPipelineKeyHash {
 		std::size_t operator()(const GraphicsPipelineKey& key) const;
 	};
@@ -263,6 +278,8 @@ private:
 	GraphicContext&                        m_graphics;
 	ShaderRecompiler::IR::ImageHeapSource* m_image_heap;
 	std::unordered_map<ProgramKey, Program, ProgramKeyHash> m_program_cache;
+	std::unordered_map<PretranslatedKey, std::unique_ptr<ShaderRecompiler::TranslateResult>,
+	                   PretranslatedKeyHash>                m_pretranslated;
 	// Modules compiled per stage.
 	std::array<uint32_t, static_cast<size_t>(ShaderType::TessellationEvaluation) + 1> m_compiled {};
 	ProgramKey                             m_lookup_key;
@@ -330,6 +347,8 @@ private:
 
 	// pipelineSerialization.cpp
 	void WarmUp(const std::filesystem::path& path);
+	// Pre-translates compute and pixel shaders from a raw shader pack into m_pretranslated.
+	void PretranslatePack(const std::filesystem::path& path);
 	bool LoadRecord(std::span<const uint8_t>& records);
 	void StoreModule(const ProgramKey& key, const Program& program, const ShaderModule& module,
 	                 const std::vector<uint32_t>& spirv);

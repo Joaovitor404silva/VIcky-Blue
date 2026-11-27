@@ -74,6 +74,7 @@ static void PrintUsage() {
 	::printf("  --shader-validation                  Enable shader validation.\n");
 	::printf("  --shader-cache                       Keep compiled shaders and pipelines between boots.\n");
 	::printf("  --build-shader-cache                 Rebuild the shader cache from its recipes, then exit\n"
+	         "  --pretranslate-shaders <path>        Pre-translate compute and pixel shaders from a pack at boot\n"
 	         "                                       without running the title. Implies --shader-cache.\n");
 	::printf("  --tessellation                      Draw tessellation patches; skipped by default.\n");
 	::printf("  --occlusion-queries                  Count occlusion query samples on the GPU.\n");
@@ -312,6 +313,14 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.game_patch = path;
+		} else if (arg == "--pretranslate-shaders") {
+			value           = Common::FixFilenameSlash(value);
+			const auto path = Common::PathFromUtf8(value);
+			if (!Common::File::IsFileExisting(path)) {
+				::printf("--pretranslate-shaders must point to an existing file: %s\n", value.c_str());
+				return false;
+			}
+			options.config.pretranslate_shaders = path;
 		} else if (arg == "--addcont-dir") {
 			if (!options.addcont_dir.empty()) {
 				::printf("--addcont-dir can only be specified once\n");

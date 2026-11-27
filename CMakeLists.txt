@@ -558,6 +558,13 @@ add_executable(shader_vertex_metadata_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(shader_vertex_metadata_tests PRIVATE ${inc_headers})
 
+add_executable(shader_pack_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/ShaderPackTests.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/shaderPack.cpp"
+)
+target_link_libraries(shader_pack_tests xxHash::xxhash)
+target_include_directories(shader_pack_tests PRIVATE ${inc_headers})
+
 add_executable(resource_materialization_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ResourceMaterializationTests.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/guest_gpu/gpu_format.cpp"
@@ -848,6 +855,7 @@ if(BUILD_TESTING)
 	add_test(NAME lru_cache COMMAND $<TARGET_FILE:lru_cache_tests>)
 	add_test(NAME common COMMAND $<TARGET_FILE:common_tests>)
 	add_test(NAME shader_vertex_metadata COMMAND $<TARGET_FILE:shader_vertex_metadata_tests>)
+	add_test(NAME shader_pack COMMAND $<TARGET_FILE:shader_pack_tests>)
 	add_test(NAME resource_materialization COMMAND $<TARGET_FILE:resource_materialization_tests>)
 	add_test(NAME resource_tracking COMMAND $<TARGET_FILE:resource_tracking_tests>)
 	add_test(NAME event_queue_lifetime COMMAND $<TARGET_FILE:event_queue_lifetime_tests>)
@@ -970,6 +978,7 @@ if(BUILD_TESTING)
 		lru_cache_tests
 		common_tests
 		shader_vertex_metadata_tests
+		shader_pack_tests
 		resource_materialization_tests
 		resource_tracking_tests
 		event_queue_lifetime_tests
