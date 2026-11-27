@@ -49473,6 +49473,39 @@ TestCase ImageAtomicNarrowInteger(bool is_16bit) {
   return test;
 }
 
+// Float min/max on a 16Float image compare the texels as halves, not as 32-bit floats.
+TestCase ImageAtomicNarrowFloat16() {
+  using F = Prospero::BufferFormat;
+  TestCase test;
+  test.name = "ImageAtomicNarrowFloat16MinMax";
+  test.user_data = MakeStorageTextureData(F::k16Float);
+  test.has_user_data = true;
+  test.storage_image_r32ui.assign(16, 0);
+  test.expected_storage_image_r32ui.assign(16, 0);
+  auto &code = test.code;
+  // texel, opcode (0x1e FMIN, 0x1f FMAX), previous half, source half, expected half.
+  const u32 cases[][5] = {
+      {0, 0x1fu, 0xbc00u, 0x3c00u, 0x3c00u}, // max(-1, 1) = 1
+      {1, 0x1eu, 0x4000u, 0xc000u, 0xc000u}, // min(2, -2) = -2
+      {2, 0x1fu, 0x4400u, 0x3c00u, 0x4400u}, // max(4, 1) = 4
+      {3, 0x1eu, 0x3c00u, 0x0001u, 0x0001u}, // min(1, smallest denormal) = denormal
+  };
+  for (const auto &c : cases) {
+    test.storage_image_r32ui[c[0]] = c[2];
+    test.expected_storage_image_r32ui[c[0]] = c[4];
+    AppendVMovU32(&code, 0, c[0]);
+    AppendVMovU32(&code, 1, 0);
+    AppendVMovLiteral(&code, 2, c[3]);
+    code.push_back(EncodeMimg0(c[1], 1u, 0, true));
+    code.push_back(EncodeMimg1(2, 0));
+    AppendStoreVgpr(&code, 2, c[0]);
+    test.expected.push_back(c[2]);
+  }
+  code.push_back(EncodeSopp(0x01, 0)); // s_endpgm
+  test.initial.assign(test.expected.size(), 0xdeadbeefu);
+  return test;
+}
+
 // float_image: the descriptor says 32Float or 32_32Float; the atomic still acts on the texel bits.
 TestCase ImageAtomicIntegerGlcAndExec(const ImageAtomicIntegerCase &atomic, bool wide,
                                       bool float_image = false) {
@@ -51193,6 +51226,7 @@ std::vector<TestCase> MakeCases() {
   }
   cases.push_back(ImageAtomicNarrowInteger(false));
   cases.push_back(ImageAtomicNarrowInteger(true));
+  cases.push_back(ImageAtomicNarrowFloat16());
   AddCase(ImageAtomicFloatGlcAndExec<true>);
   AddCase(ImageAtomicFloatGlcAndExec<false>);
   AddCase(ImageAtomicFloatSpecialValues<true>);
@@ -59198,6 +59232,7 @@ int main(int argc, char **argv) {
     }
     RunCase(&vulkan, ImageAtomicNarrowInteger(false));
     RunCase(&vulkan, ImageAtomicNarrowInteger(true));
+    RunCase(&vulkan, ImageAtomicNarrowFloat16());
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--ds-ordered-count-only") == 0) {

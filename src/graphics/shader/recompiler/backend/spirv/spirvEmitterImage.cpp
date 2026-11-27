@@ -1144,8 +1144,10 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 			                                     ImageDescriptorPointer(state, mem.resource),
 			                                     CoordU32(ctx, mem, *address, dimension),
 			                                     ConstantU32(state, 0));
-			           if (op == IR::ValueOpcode::ImageAtomicFMin32 ||
-			               op == IR::ValueOpcode::ImageAtomicFMax32) {
+			           const bool float_minmax = op == IR::ValueOpcode::ImageAtomicFMin32 ||
+			                                     op == IR::ValueOpcode::ImageAtomicFMax32;
+			           // Narrow images run float min/max on the texel's own width below.
+			           if (float_minmax && image.atomic_bits == 0u) {
 				           return AtomicUpdate(state, pointer, IR::ResourceKind::Image,
 				                               [&](uint32_t old) {
 					                               return EmitFloatAtomicReplacement(
@@ -1167,10 +1169,34 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 				           const auto old = AtomicUpdate(
 				               state, pointer, IR::ResourceKind::Image, [&](uint32_t current) {
 					               const auto cur = Binary(state, spv::OpBitwiseAnd, u32, current, mask);
-					               const auto arg = Binary(state, spv::OpBitwiseAnd, u32,
-					                                       ctx.Arg(inst, inst.NumArgs() - 2), mask);
+					               const auto arg = Binary(
+					                   state, spv::OpBitwiseAnd, u32,
+					                   float_minmax ? ctx.Arg(inst, 2) : ctx.Arg(inst, inst.NumArgs() - 2),
+					                   mask);
 					               uint32_t next = cur;
 					               switch (op) {
+						               case IR::ValueOpcode::ImageAtomicFMin32:
+						               case IR::ValueOpcode::ImageAtomicFMax32: {
+							               if (bits != 16u) {
+								               ctx.Fail(inst, "float atomic on an 8-bit image");
+								               break;
+							               }
+							               // Compare as half floats: both widen exactly to f32, and the
+							               // f32 rule picks one of its operands, so the half bits of the
+							               // operand it picks are stored.
+							               const auto cur_f32 =
+							                   EmitBitcastF32ToU32(state, EmitF16BitsToF32(state, cur));
+							               const auto arg_f32 =
+							                   EmitBitcastF32ToU32(state, EmitF16BitsToF32(state, arg));
+							               const auto picked = EmitFloatAtomicReplacement(
+							                   state, cur_f32, arg_f32,
+							                   op == IR::ValueOpcode::ImageAtomicFMax32);
+							               next = Select(state, u32,
+							                             Binary(state, spv::OpIEqual, TypeBool(state),
+							                                    picked, arg_f32),
+							                             arg, cur);
+							               break;
+						               }
 						               case IR::ValueOpcode::ImageAtomicCompareSwap32: {
 							               const auto desired = Binary(
 							                   state, spv::OpBitwiseAnd, u32,
