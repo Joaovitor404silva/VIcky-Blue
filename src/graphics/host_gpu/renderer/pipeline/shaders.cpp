@@ -76,6 +76,25 @@ static void AddLayoutBindings(std::vector<vk::DescriptorSetLayoutBinding>& descr
 	}
 }
 
+// Creates the pipeline. Fast: from the driver cache if it holds it, else unoptimized and outside
+// the cache, which the driver builds many times faster (Pipeline::unoptimized). Optimize: the
+// optimized build of such a pipeline, with the layouts it already has.
+template <typename Info, typename Create>
+static vk::Result CreatePipelineHandle(PipelineCache::Pipeline& pipeline, Info info,
+                                       vk::PipelineCache driver_cache, PipelineBuild build,
+                                       Create create) {
+	if (build != PipelineBuild::Fast) return create(driver_cache, info);
+	if (driver_cache != nullptr) {
+		auto lookup = info;
+		lookup.flags |= vk::PipelineCreateFlagBits::eFailOnPipelineCompileRequired;
+		if (create(driver_cache, lookup) == vk::Result::eSuccess) return vk::Result::eSuccess;
+		pipeline.pipeline = nullptr;
+	}
+	info.flags |= vk::PipelineCreateFlagBits::eDisableOptimization;
+	pipeline.unoptimized = true;
+	return create(nullptr, info);
+}
+
 // Creates the descriptor set layout and the pipeline layout that uses it.
 static void CreateLayouts(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
                           std::span<const vk::DescriptorSetLayoutBinding> bindings) {
@@ -200,7 +219,7 @@ static vk::Format InputFormat(uint8_t raw_format, uint32_t used_components) {
 void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
                             const GraphicsPipelineKey&                 key,
                             const std::array<const ShaderModule*, 4>& stages,
-                            vk::PipelineCache                          driver_cache) {
+                            vk::PipelineCache driver_cache, PipelineBuild build) {
 	const auto& rendering     = key.rendering;
 	const auto& vertex_input  = key.vertex_input;
 	const auto& static_params = key.static_params;
@@ -355,7 +374,7 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 			pipeline.push_stages |= native_stage;
 		}
 	}
-	CreateLayouts(graphics, pipeline, descriptor_bindings);
+	if (build != PipelineBuild::Optimize) CreateLayouts(graphics, pipeline, descriptor_bindings);
 
 	vk::PipelineDepthStencilStateCreateInfo depth_stencil_info {};
 
@@ -412,8 +431,12 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	pipeline_info.pDynamicState       = &dynamic_state;
 	pipeline_info.layout              = pipeline.pipeline_layout;
 
-	const auto result = graphics.device.createGraphicsPipelines(driver_cache, 1, &pipeline_info,
-	                                                            nullptr, &pipeline.pipeline);
+	const auto result = CreatePipelineHandle(
+	    pipeline, pipeline_info, driver_cache, build,
+	    [&](vk::PipelineCache cache, const vk::GraphicsPipelineCreateInfo& info) {
+		    return graphics.device.createGraphicsPipelines(cache, 1, &info, nullptr,
+		                                                   &pipeline.pipeline);
+	    });
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
 	graphics.device.destroyShaderModule(tess_control_shader_module, nullptr);
@@ -422,7 +445,8 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 }
 
 void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
-                            const ShaderModule& module, vk::PipelineCache driver_cache) {
+                            const ShaderModule& module, vk::PipelineCache driver_cache,
+                            PipelineBuild build) {
 	vk::PipelineShaderStageCreateInfo                     comp_shader_stage_info {};
 	vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo comp_subgroup_size {};
 	comp_shader_stage_info.stage  = vk::ShaderStageFlagBits::eCompute;
@@ -439,7 +463,7 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	AddLayoutBindings(descriptor_bindings, module.info, vk::ShaderStageFlagBits::eCompute);
 	pipeline.uses_image_heap = module.info.info.uses_image_heap;
 	pipeline.push_stages     = vk::ShaderStageFlagBits::eCompute;
-	CreateLayouts(graphics, pipeline, descriptor_bindings);
+	if (build != PipelineBuild::Optimize) CreateLayouts(graphics, pipeline, descriptor_bindings);
 
 	vk::ComputePipelineCreateInfo info {};
 	if (module.info.info.uses_gds) {
@@ -448,8 +472,12 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	info.stage  = comp_shader_stage_info;
 	info.layout = pipeline.pipeline_layout;
 
-	const auto result =
-	    graphics.device.createComputePipelines(driver_cache, 1, &info, nullptr, &pipeline.pipeline);
+	const auto result = CreatePipelineHandle(
+	    pipeline, info, driver_cache, build,
+	    [&](vk::PipelineCache cache, const vk::ComputePipelineCreateInfo& create) {
+		    return graphics.device.createComputePipelines(cache, 1, &create, nullptr,
+		                                                  &pipeline.pipeline);
+	    });
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 }
 

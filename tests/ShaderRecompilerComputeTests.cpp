@@ -736,6 +736,25 @@ struct PipelineCacheTestAccess {
 
   static auto Compiled(const PipelineCache &cache) { return cache.m_compiled; }
 
+  static void SetFastBuild(PipelineCache &cache, bool fast) { cache.m_fast_build = fast; }
+
+  static bool Unoptimized(const PipelineCache &cache, uint64_t module_id) {
+    return cache.m_compute_pipelines.at(module_id).unoptimized;
+  }
+
+  static uint32_t Optimizing(const PipelineCache &cache) { return cache.m_optimizing; }
+
+  // Promotes finished optimized builds until none is pending; false after a minute.
+  static bool WaitOptimized(PipelineCache &cache) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(1);
+    for (;;) {
+      cache.PromoteOptimized();
+      if (cache.m_optimizing == 0) return true;
+      if (std::chrono::steady_clock::now() > deadline) return false;
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  }
+
   template <typename InputInfo>
   static const ShaderModule *GetProgram(PipelineCache &cache, const ShaderParams &params,
                                         InputInfo &input,
@@ -21545,7 +21564,7 @@ public:
         registers.SetDepthBoundsMin(pass == 0 ? 0.5f : 0.625f);
         registers.SetDepthBoundsMax(pass == 0 ? 0.5625f : 0.6875f);
         Require(name, "dynamic depth bounds pipeline reuse",
-                pipeline(true, 2, 2).pipeline == filled.pipeline,
+                &pipeline(true, 2, 2) == &filled,
                 "changing depth bounds or their enable state created another pipeline");
         draw(filled);
         const auto bounded_pixels = read_color();
@@ -21561,9 +21580,9 @@ public:
       }
     } else {
       auto &wireframe = pipeline(true, 1, 1);
-      Require(name, "pipeline cache", filled.pipeline != wireframe.pipeline &&
-                  pipeline(true, 2, 2).pipeline == filled.pipeline &&
-                  pipeline(false, 1, 0).pipeline == filled.pipeline,
+      Require(name, "pipeline cache", &filled != &wireframe &&
+                  &pipeline(true, 2, 2) == &filled &&
+                  &pipeline(false, 1, 0) == &filled,
               "polygon mode was lost from the cache key or dormant face modes were applied");
       draw(wireframe);
       const auto line_pixels = read_color();
@@ -21574,9 +21593,9 @@ public:
               "wireframe did not preserve triangle edges while leaving its interior empty");
       auto &last_vertex = pipeline(true, 2, 2, true);
       Require(name, "provoking vertex pipeline cache",
-              last_vertex.pipeline != filled.pipeline &&
-                  pipeline(true, 2, 2, true).pipeline == last_vertex.pipeline &&
-                  pipeline(true, 2, 2).pipeline == filled.pipeline,
+              &last_vertex != &filled &&
+                  &pipeline(true, 2, 2, true) == &last_vertex &&
+                  &pipeline(true, 2, 2) == &filled,
               "first and last provoking vertices did not keep distinct cached pipelines");
       draw(last_vertex);
       const auto last_pixels = read_color();
@@ -21602,21 +21621,21 @@ public:
       };
       auto &disabled_blend = blend_pipeline(false, false);
       Require(name, "effective blend pipeline cache",
-              blend_pipeline(false, true).pipeline == disabled_blend.pipeline &&
-                  blend_pipeline(true, true).pipeline == disabled_blend.pipeline &&
-                  blend_pipeline(false, false, true).pipeline == disabled_blend.pipeline &&
-                  blend_pipeline(true, true, true).pipeline == disabled_blend.pipeline,
+              &blend_pipeline(false, true) == &disabled_blend &&
+                  &blend_pipeline(true, true) == &disabled_blend &&
+                  &blend_pipeline(false, false, true) == &disabled_blend &&
+                  &blend_pipeline(true, true, true) == &disabled_blend,
               "disabled and bypassed blending did not share the same host pipeline");
       auto &enabled_blend = blend_pipeline(true, false);
       Require(name, "enabled blend pipeline cache",
-              enabled_blend.pipeline != disabled_blend.pipeline &&
-                  blend_pipeline(true, false).pipeline == enabled_blend.pipeline,
+              &enabled_blend != &disabled_blend &&
+                  &blend_pipeline(true, false) == &enabled_blend,
               "active blending was lost from the pipeline key or missed its cached pipeline");
       auto dormant_alpha = registers.GetBlendControl(0);
       dormant_alpha.alpha_srcblend = static_cast<uint8_t>(Prospero::BlendFactor::kOne);
       registers.SetBlendControl(0, dormant_alpha);
       Require(name, "dormant alpha blend pipeline cache",
-              pipeline(true, 2, 2).pipeline == enabled_blend.pipeline,
+              &pipeline(true, 2, 2) == &enabled_blend,
               "inactive separate-alpha state recompiled the pipeline");
       draw(enabled_blend);
       const auto blended_pixels = read_color();
@@ -21669,8 +21688,8 @@ public:
         return ReadBuffer(name, stencil_readback, extent * extent / 4);
       };
       const std::array stencil_pipelines{
-          pipeline(true, 2, 2, false, true).pipeline,
-          pipeline(true, 2, 2, false, false).pipeline};
+          &pipeline(true, 2, 2, false, true),
+          &pipeline(true, 2, 2, false, false)};
       Require(name, "dynamic winding pipeline reuse",
               stencil_pipelines[0] == stencil_pipelines[1],
               "the winding changed the graphics pipeline");
@@ -21683,7 +21702,7 @@ public:
              0, 1, 0, 1}, clear);
         const auto &selected = pipeline(true, 2, 2, false, !back_face);
         Require(name, "dynamic stencil pipeline reuse",
-                selected.pipeline == stencil_pipelines[back_face],
+                &selected == stencil_pipelines[back_face],
                 "stencil enable, operations or references changed the graphics pipeline");
         draw(selected);
         const auto result = read_stencil();
@@ -22020,7 +22039,7 @@ public:
         float alpha;
       };
       uint64_t broadcast_program = 0;
-      vk::Pipeline broadcast_pipeline{};
+      const PipelineCache::Pipeline *broadcast_pipeline = nullptr;
       for (const auto test : {
           AlphaBlendCase{false, Prospero::BlendFactor::kOne, ShaderAlphaBlendSource::SourceAlpha, 0.4f},
           AlphaBlendCase{true, Prospero::BlendFactor::kSrcAlpha, ShaderAlphaBlendSource::SourceAlpha, 0.4f},
@@ -22038,10 +22057,10 @@ public:
         if (test.mode == ShaderAlphaBlendSource::SourceAlpha) {
           Require(name, "equal blend equation cache reuse",
                   broadcast_program == 0 || (pixel.stage.module->id == broadcast_program &&
-                                              selected.pipeline == broadcast_pipeline),
+                                              &selected == broadcast_pipeline),
                   "equivalent separate alpha state created another shader or pipeline");
           broadcast_program = pixel.stage.module->id;
-          broadcast_pipeline = selected.pipeline;
+          broadcast_pipeline = &selected;
         }
         constexpr std::array<float, 4> destination{0.3f, 0.3f, 0.1f, 0.2f};
         draw(selected, 3, std::bit_cast<std::array<u32, 4>>(destination));
@@ -25012,6 +25031,7 @@ private:
     device_features13.pNext = &barycentric;
     device_features13.dynamicRendering = true;
     device_features13.synchronization2 = true;
+    device_features13.pipelineCreationCacheControl = true;
     vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR derivatives{};
     derivatives.pNext = &device_features13;
     derivatives.computeDerivativeGroupQuads = true;
@@ -51208,6 +51228,51 @@ void CheckComputeLdsLimit(VulkanHarness &vulkan) {
   std::printf("[gpu]     %-32s ok\n", name);
 }
 
+// A pipeline no cache holds is first built without optimization, so its first dispatch does not
+// wait for the driver's optimizer; the optimized build made on a worker then replaces it in
+// place. With the fast build off it is built optimized at once.
+void CheckFastPipelineBuild(VulkanHarness &vulkan) {
+  constexpr const char *name = "FastPipelineBuild";
+  std::vector<u32> code;
+  AppendVMovU32(&code, 1, 7);
+  code.push_back(EncodeDs0(0x0d)); // ds_write_b32 v0, v1
+  code.push_back(EncodeDs1(0, 1, 0));
+  AppendEnd(&code);
+  ShaderMapUserData(reinterpret_cast<uint64_t>(code.data()),
+      {.type = Prospero::ShaderBinaryType::kCs,
+       .code_size_bytes = static_cast<u32>(code.size() * sizeof(u32))});
+  HW::ComputeShaderInfo regs{};
+  regs.cs_regs.data_addr = reinterpret_cast<uint64_t>(code.data());
+  regs.cs_regs.num_thread_x = 64;
+  regs.cs_regs.num_thread_y = 1;
+  regs.cs_regs.num_thread_z = 1;
+  regs.cs_regs.wave_size = 32;
+  regs.cs_regs.lds_size = 2;
+
+  for (const bool fast : {true, false}) {
+    PipelineCache cache(vulkan.RuntimeContext(), nullptr);
+    PipelineCacheTestAccess::SetFastBuild(cache, fast);
+    ShaderComputeInputInfo input{};
+    const auto *program = cache.GetComputeProgram(regs, input);
+    Require(name, "program", program != nullptr, "the compute program did not compile");
+    const auto first = cache.GetComputePipeline(input).pipeline;
+    Require(name, "first build", first != nullptr, "no pipeline was created");
+    Require(name, "first build kind",
+            PipelineCacheTestAccess::Unoptimized(cache, program->id) == fast &&
+                PipelineCacheTestAccess::Optimizing(cache) == (fast ? 1u : 0u),
+            fast ? "an uncached pipeline was not built unoptimized with an optimized build queued"
+                 : "the fast build was off, yet the pipeline was built unoptimized");
+    Require(name, "optimized build", PipelineCacheTestAccess::WaitOptimized(cache),
+            "the optimized build never finished");
+    const auto promoted = cache.GetComputePipeline(input).pipeline;
+    Require(name, "promotion",
+            !PipelineCacheTestAccess::Unoptimized(cache, program->id) &&
+                (promoted != first) == fast,
+            "the optimized build did not replace the unoptimized pipeline in place");
+  }
+  std::printf("[gpu]     %-32s ok\n", name);
+}
+
 // The HS wave runs the fused LS and HS and the GS wave runs the TES, so VGT_SHADER_STAGES_EN
 // gives each stage its wave size; a GS that amplifies tessellated primitives stays rejected.
 // The TES gates its vertices on GS_TG_INFO's group vertex count (PPSA02110's prologue) and
@@ -55541,9 +55606,10 @@ void CheckVulkan13FeatureRequirements() {
       "Vulkan13FeatureRequirements", "production requirements",
       features.sType == vk::StructureType::ePhysicalDeviceVulkan13Features &&
           features.pNext == nullptr && features.dynamicRendering == VK_TRUE &&
-          features.synchronization2 == VK_TRUE,
-      "production device creation did not require dynamic rendering and "
-      "synchronization2 from one feature declaration");
+          features.synchronization2 == VK_TRUE &&
+          features.pipelineCreationCacheControl == VK_TRUE,
+      "production device creation did not require dynamic rendering, synchronization2 and "
+      "pipeline creation cache control from one feature declaration");
   std::printf("[host]    %-32s ok\n", "Vulkan13FeatureRequirements");
 }
 
@@ -58377,6 +58443,11 @@ int main(int argc, char **argv) {
     CheckComputeThreadDimensions(vulkan);
     return 0;
   }
+  if (argc == 2 && std::strcmp(argv[1], "--fast-pipeline-only") == 0) {
+    VulkanHarness vulkan;
+    CheckFastPipelineBuild(vulkan);
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--program-id-only") == 0) {
     VulkanHarness vulkan;
     CheckStableProgramIds(vulkan);
@@ -59729,6 +59800,7 @@ int main(int argc, char **argv) {
   vulkan.CheckGpuTilerCpuParity();
   vulkan.CheckNativeIndirectDispatch();
   CheckComputeLdsLimit(vulkan);
+  CheckFastPipelineBuild(vulkan);
   CheckTessellationWaveSizes(vulkan);
   CheckStableProgramIds(vulkan);
   CheckComputeQueueModules(vulkan);

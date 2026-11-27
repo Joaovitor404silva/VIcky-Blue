@@ -469,11 +469,67 @@ PipelineCache::PipelineCache(GraphicContext&                         graphics,
     : m_graphics(graphics), m_image_heap(image_heap),
       m_next_driver_cache_save(std::chrono::steady_clock::now() + DriverCacheSaveInterval) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
+	if (const char* text = std::getenv("KYTY_PIPELINE_FAST_BUILD"); text != nullptr) {
+		m_fast_build = std::string_view(text) != "0";
+	}
 	InitializeDriverCache();
 	WarmUp(shader_store);
 }
 
+PipelineBuild PipelineCache::FirstBuild() const {
+	return m_fast_build ? PipelineBuild::Fast : PipelineBuild::Full;
+}
+
+void PipelineCache::PromoteOptimized() {
+	if (m_optimizing == 0) return;
+	std::lock_guard lock(m_optimized->mutex);
+	for (const auto& [pipeline, optimized]: m_optimized->finished) {
+		m_replaced_pipelines.push_back(pipeline->pipeline);
+		pipeline->pipeline    = optimized;
+		pipeline->unoptimized = false;
+		m_optimizing--;
+	}
+	m_optimized->finished.clear();
+}
+
+void PipelineCache::QueueOptimized(Pipeline& pipeline, std::function<void(Pipeline&)> build) {
+	if (!pipeline.unoptimized) return;
+	if (m_optimizer == nullptr) {
+		m_optimized = std::make_shared<OptimizedBuilds>();
+		m_optimizer = std::make_unique<Common::AsyncJobs<bool>>(OptimizerThreads);
+	}
+	auto layouts     = pipeline;
+	layouts.pipeline = nullptr;
+	m_optimizer->Submit([target = &pipeline, layouts, build = std::move(build),
+	                     builds = m_optimized, device = m_graphics.device]() mutable {
+		build(layouts);
+		std::lock_guard lock(builds->mutex);
+		if (builds->stopping) {
+			device.destroyPipeline(layouts.pipeline, nullptr);
+		} else {
+			builds->finished.emplace_back(target, layouts.pipeline);
+		}
+		return true;
+	});
+	m_optimizing++;
+}
+
 PipelineCache::~PipelineCache() {
+	// Builds finished and not promoted are destroyed here, those still running by themselves.
+	if (m_optimizer != nullptr) {
+		{
+			std::lock_guard lock(m_optimized->mutex);
+			m_optimized->stopping = true;
+			for (const auto& [pipeline, optimized]: m_optimized->finished) {
+				(void)pipeline;
+				m_graphics.device.destroyPipeline(optimized, nullptr);
+			}
+		}
+		m_optimizer.reset();
+	}
+	for (const auto pipeline: m_replaced_pipelines) {
+		m_graphics.device.destroyPipeline(pipeline, nullptr);
+	}
 	Save();
 	auto destroy = [this](const auto& pipelines) {
 		for (const auto& pipeline: pipelines | std::views::values) {
@@ -910,6 +966,7 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(const CommandBuffer&
 	const auto& ps_input_info = state.ps_input_info;
 	const auto& vs_input_info = vertex_info.front();
 	KYTY_PROFILER_BLOCK("PipelineCache::CreatePipeline(Gfx)", profiler::colors::DeepOrangeA200);
+	PromoteOptimized();
 
 	const bool ps_active    = state.ps_active;
 	const bool tessellation = vertex_info.size() == 3;
@@ -1088,8 +1145,21 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(const CommandBuffer&
 		Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::PipelinesCreated,
 		                                         Common::DebugCounters::Counter::PipelineCreateNs,
 		                                         Common::DebugCounters::Peak::PipelineCreateNs);
-		CreatePipelineInternal(m_graphics, pipeline, key, stages, m_driver_cache);
+		CreatePipelineInternal(m_graphics, pipeline, key, stages, m_driver_cache, FirstBuild());
 	}
+	// The worker gets copies: program module lists may grow while it builds.
+	auto modules = std::make_shared<std::array<std::optional<ShaderModule>, 4>>();
+	for (size_t i = 0; i < stages.size(); i++) {
+		if (stages[i] != nullptr) (*modules)[i] = *stages[i];
+	}
+	QueueOptimized(pipeline, [this, key, modules](Pipeline& layouts) {
+		std::array<const ShaderModule*, 4> copies {};
+		for (size_t i = 0; i < copies.size(); i++) {
+			if ((*modules)[i]) copies[i] = &*(*modules)[i];
+		}
+		CreatePipelineInternal(m_graphics, layouts, key, copies, m_driver_cache,
+		                       PipelineBuild::Optimize);
+	});
 	StorePipeline(key);
 	CheckpointDriverCache();
 
@@ -1098,6 +1168,7 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(const CommandBuffer&
 
 PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info) {
 	KYTY_PROFILER_BLOCK("PipelineCache::CreatePipeline(Compute)", profiler::colors::RedA100);
+	PromoteOptimized();
 
 	const auto& module = *input_info.stage.module;
 
@@ -1115,8 +1186,11 @@ PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeIn
 		Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::PipelinesCreated,
 		                                         Common::DebugCounters::Counter::PipelineCreateNs,
 		                                         Common::DebugCounters::Peak::PipelineCreateNs);
-		CreatePipelineInternal(m_graphics, pipeline, module, m_driver_cache);
+		CreatePipelineInternal(m_graphics, pipeline, module, m_driver_cache, FirstBuild());
 	}
+	QueueOptimized(pipeline, [this, module = std::make_shared<ShaderModule>(module)](Pipeline& layouts) {
+		CreatePipelineInternal(m_graphics, layouts, *module, m_driver_cache, PipelineBuild::Optimize);
+	});
 	CheckpointDriverCache();
 
 	return pipeline;
