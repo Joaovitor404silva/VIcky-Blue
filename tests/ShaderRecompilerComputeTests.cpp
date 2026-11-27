@@ -46331,7 +46331,7 @@ void CheckIndirectBufferStore(VulkanHarness &vulkan) {
       if (layout != Layout::Shared && layout != Layout::IndexedNullChild && swapped) continue;
       // Repeated keys select two distinct logical buffers within one native allocation.
       // Keys below, between and above the live keys must not select either buffer.
-      compiled.resources.flattened_srt = {0u, 0u, 0u, 0u, 3u,
+      compiled.resources.flattened_srt = {0u, 0u, 0u, 0u, 5u, 3u,
                                          10u, swapped ? 0u : 1u,
                                          12u, swapped ? 1u : 0u,
                                          14u, swapped ? 0u : 1u};
@@ -46425,7 +46425,7 @@ void CheckIndirectBufferAtomic(VulkanHarness &vulkan) {
     CheckSpirvEmission(test, compiled.spirv);
 
     for (const bool swapped : {false, true}) {
-      compiled.resources.flattened_srt = {0u, 0u, 0u, 0u, 3u,
+      compiled.resources.flattened_srt = {0u, 0u, 0u, 0u, 5u, 3u,
                                          10u, swapped ? 0u : 1u,
                                          12u, swapped ? 1u : 0u,
                                          14u, swapped ? 0u : 1u};
@@ -48352,6 +48352,7 @@ void CheckIndirectImageKeySwitch(VulkanHarness &vulkan) {
   CompiledShader compiled;
   compiled.program = std::move(program);
   constexpr std::array ordinals{0u, 1u, 2u, 3u, 4u, 5u, 2u, 0u};
+  compiled.resources.flattened_srt.push_back(1u);
   compiled.resources.flattened_srt.push_back(ordinals.size());
   compiled.resources.flattened_srt.insert(compiled.resources.flattened_srt.end(),
                                           ordinals.begin(), ordinals.end());
@@ -48402,7 +48403,7 @@ void CheckIndirectImageKeySwitch(VulkanHarness &vulkan) {
     selected_resources = homogeneous ? std::vector<u32>{0u, 2u, 3u, 5u, 6u}
                                      : root.indirect_resources;
     if (homogeneous) test.name = "IndirectImageGatherHomogeneous";
-    compiled.resources.flattened_srt[6] = homogeneous ? 4u : ordinals[5];
+    compiled.resources.flattened_srt[7] = homogeneous ? 4u : ordinals[5];
     if (mixed_mips) {
       test.name = "IndirectImageGatherMixedMips";
       compiled.program.info.images[3].mip_mode = ImageMipMode::Dynamic;
@@ -48504,7 +48505,7 @@ void CheckIndirectImageKeySwitch(VulkanHarness &vulkan) {
       test.initial.assign(wave_size, 0xdeadbeefu);
       test.expected.assign(wave_size, 0u);
       for (u32 lane = 0; lane < ordinals.size(); ++lane) {
-        const auto resource = selected_resources[compiled.resources.flattened_srt[1u + lane]];
+        const auto resource = selected_resources[compiled.resources.flattened_srt[2u + lane]];
         test.expected[lane] = std::bit_cast<u32>(float(resource +
             ((fetch && resource != 0u) || (mixed_mips && resource == 3u) ? 10u : 0u)));
       }
@@ -48821,6 +48822,7 @@ void CheckSamplerCandidateTables(VulkanHarness &vulkan) {
     compiled.resources.flattened_srt.clear();
     if (mapped) {
       // Only the sampler needs a lookup buffer: reverse its keys to distinct sampler ordinals.
+      compiled.resources.flattened_srt.push_back(1u);
       compiled.resources.flattened_srt.push_back(static_cast<u32>(table.size()));
       for (size_t index = table.size(); index != 0; --index)
         compiled.resources.flattened_srt.push_back(static_cast<u32>(index - 1u));
@@ -54819,7 +54821,7 @@ void CheckImageSamplerSpecialization() {
                 MaterializeResources(plan, runtime, snapshot, specialization) &&
                 snapshot.images.size() == count + 1u,
             "GPU-selected material descriptors did not expand beyond native root capacity");
-    const auto offset = specialization.images[0].indirect_mapping_offset;
+    const auto offset = snapshot.flattened_srt[specialization.images[0].indirect_mapping_offset];
     const auto ordinal = [&](u32 byte_offset) {
       const auto word = byte_offset >> 2u;
       return word < snapshot.flattened_srt[offset]

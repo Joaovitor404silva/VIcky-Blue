@@ -375,7 +375,7 @@ void TestInvariantIndirectImageMaterialization(bool nested) {
             memory.watched_dwords == 36u && memory.reads == 1u,
         "image table was not read once independently of its GPU selector chain");
   const auto root = specialization.images[0];
-  const auto mapping = root.indirect_mapping_offset;
+  const auto mapping = snapshot.flattened_srt[root.indirect_mapping_offset];
   Check(root.indirect_search_iterations == 0u && snapshot.flattened_srt[mapping] == 17u &&
             snapshot.flattened_srt[mapping + 1u] == 0u &&
             snapshot.flattened_srt[mapping + 5u] == 1u &&
@@ -502,7 +502,7 @@ void TestResidentImageHeap() {
             memory.watched_reads == 0u && snapshot.images.size() == 3u,
         "resident image heap was materialized entry by entry");
   const auto &root = specialization.images[0];
-  const auto mapping = root.indirect_mapping_offset;
+  const auto mapping = snapshot.flattened_srt[root.indirect_mapping_offset];
   Check(root.heap && root.indirect_root == 0u && root.indirect_search_iterations == 0u &&
             snapshot.flattened_srt.size() == mapping + 3u &&
             snapshot.flattened_srt[mapping] == 36u &&
@@ -606,7 +606,7 @@ void TestBoundedImageViewEligibility() {
   Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
             snapshot.images.size() == 4u && memory.reads == 1u,
         "unrelated cube/3D heap entries prevented a typed 2D table view");
-  const auto mapping = specialization.images[0].indirect_mapping_offset;
+  const auto mapping = snapshot.flattened_srt[specialization.images[0].indirect_mapping_offset];
   Check(snapshot.flattened_srt[mapping] == 53u &&
             snapshot.flattened_srt[mapping + 5u] == 1u &&
             snapshot.flattened_srt[mapping + 17u] == 0u &&
@@ -626,7 +626,7 @@ void TestBoundedImageViewEligibility() {
     plan.info.images[0].r128 = r128;
     Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
               snapshot.images.size() == (r128 ? 3u : 4u) &&
-              snapshot.flattened_srt[specialization.images[0].indirect_mapping_offset + 17u] == 0u &&
+              snapshot.flattened_srt[snapshot.flattened_srt[specialization.images[0].indirect_mapping_offset] + 17u] == 0u &&
               snapshot.images[1].dwords == descriptor(0x20u, Type::kColor2D) &&
               snapshot.images.back().dwords == descriptor(0x24u, Type::kColor2D),
           "invalid heap texture view survived normalization or removed valid neighbors");
@@ -1140,7 +1140,7 @@ void TestNestedPointerImageTable() {
             memory.watched_reads != 0u && memory.watched_dwords == 1u &&
             snapshot.images.size() == count + 1u && snapshot.samplers.size() == count + 1u,
         "partial pointer row was skipped or read beyond its scalar buffer bounds");
-  const auto mapping = specialization.images[0].indirect_mapping_offset;
+  const auto mapping = snapshot.flattened_srt[specialization.images[0].indirect_mapping_offset];
   Check(snapshot.flattened_srt[mapping] == count + 1u &&
             snapshot.flattened_srt[mapping + count + 1u] == 1u,
         "partial pointer row lost its low-word pointee or dense key mapping");
@@ -1373,7 +1373,7 @@ void TestIndexedPointerImageTable() {
       Check(captured(high + objects + row * row_bytes + child * 368u + 64u, 32u),
             "nested child read was absent from the captured alias ranges");
   }
-  const auto mapping = specialization.images[0].indirect_mapping_offset;
+  const auto mapping = snapshot.flattened_srt[specialization.images[0].indirect_mapping_offset];
   Check(snapshot.flattened_srt[mapping] == 6u,
         "nested child table did not produce one dense composite-key mapping");
   for (uint32_t key = 0; key < 6u; ++key)
@@ -1874,7 +1874,7 @@ void TestGuardedDirectImageTable() {
   fill_table(memory, table);
   Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
             snapshot.images.size() == 32u && specialization.images.size() == 32u &&
-            snapshot.flattened_srt[specialization.images[0].indirect_mapping_offset] == 32u &&
+            snapshot.flattened_srt[snapshot.flattened_srt[specialization.images[0].indirect_mapping_offset]] == 32u &&
             memory.reads == 34u && memory.descriptor_reads == 32u,
         "direct table did not retain all 32 reachable descriptors");
   const auto captured_word = (table - memory.base) / 4u + 16u * 8u;
@@ -1886,7 +1886,7 @@ void TestGuardedDirectImageTable() {
              memory.words.begin() + captured_word);
   Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
             snapshot.images.size() == 32u &&
-            snapshot.flattened_srt[specialization.images[0].indirect_mapping_offset] == 32u &&
+            snapshot.flattened_srt[snapshot.flattened_srt[specialization.images[0].indirect_mapping_offset]] == 32u &&
             std::ranges::all_of(snapshot.images[16].dwords,
                                 [](uint32_t word) { return word == 0u; }),
         "captured non-descriptor record became a host image or lost its key mapping");
@@ -2000,7 +2000,7 @@ void TestGuardedDirectImageTable() {
             "empty bit loop retained a reachable image");
       continue;
     }
-    Check(snapshot.flattened_srt[specialization.images[0].indirect_mapping_offset] == count,
+    Check(snapshot.flattened_srt[snapshot.flattened_srt[specialization.images[0].indirect_mapping_offset]] == count,
           "finite bit table lost its candidate count");
     for (uint32_t key = 0; key < count; ++key) {
       Check(std::ranges::any_of(snapshot.specialization_reads, [&](const auto &read) {
@@ -2459,8 +2459,8 @@ void TestBoundedComputeImageLoop() {
     Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
               snapshot.images.size() == count &&
               specialization.images.size() == count &&
-              snapshot.flattened_srt[
-                  specialization.images[0].indirect_mapping_offset] == count &&
+              snapshot.flattened_srt[snapshot.flattened_srt[
+                  specialization.images[0].indirect_mapping_offset]] == count &&
               snapshot.images.back().dwords[0] == 0x100u + count - 1u,
           "compute image table did not refresh for a changed loop bound");
   }
@@ -2781,7 +2781,7 @@ void TestDescendingImageRange() {
     user_data[2] = count;
     Check(MaterializeResources(plan, runtime, snapshot, specialization) && snapshot.images.size() == 2u,
           "descending descriptor subtraction failed when the runtime key underflowed");
-    const auto offset = specialization.images[0].indirect_mapping_offset;
+    const auto offset = snapshot.flattened_srt[specialization.images[0].indirect_mapping_offset];
     Check(snapshot.flattened_srt[offset] == 128u, "descending mapping lost candidate keys");
     uint32_t previous = 0u;
     for (uint32_t entry = 0; entry < 128u; ++entry) {
@@ -2848,7 +2848,7 @@ void TestDescendingImageRange() {
             "a single bitmap rank became empty or required an indirect image mapping");
       return;
     }
-    const auto offset = specialization.images[0].indirect_mapping_offset;
+    const auto offset = snapshot.flattened_srt[specialization.images[0].indirect_mapping_offset];
     Check(snapshot.flattened_srt[offset] == keys.size(), "bitmap mapping lost a selected key");
     for (uint32_t index = 0; index < keys.size(); ++index) {
       const auto descriptor_record = uint32_t(0x1000u + keys[index] * 32u) / 32u;
@@ -3344,12 +3344,12 @@ void TestUniformizedMaterialImageKeys() {
   Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
             snapshot.images.size() == 2u &&
             memory.reads == 4u && memory.descriptor_reads == 2u &&
-            snapshot.flattened_srt[
-                specialization.images[0].indirect_mapping_offset] == 2u &&
-            snapshot.flattened_srt[
-                specialization.images[0].indirect_mapping_offset + 1u] == 7u &&
-            snapshot.flattened_srt[
-                specialization.images[0].indirect_mapping_offset + 3u] == 4096u,
+            snapshot.flattened_srt[snapshot.flattened_srt[
+                specialization.images[0].indirect_mapping_offset]] == 2u &&
+            snapshot.flattened_srt[snapshot.flattened_srt[
+                specialization.images[0].indirect_mapping_offset] + 1u] == 7u &&
+            snapshot.flattened_srt[snapshot.flattened_srt[
+                specialization.images[0].indirect_mapping_offset] + 3u] == 4096u,
         "material mask did not limit sparse descriptor reads");
   user_data[8] = first_material;
   Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
@@ -3591,7 +3591,7 @@ void TestIndexedMaterialImageKeys() {
         "indirect dimension query lost its specialized candidates");
   for (uint32_t root = 0; root < plan.info.images.size(); ++root) {
     const auto &image = specialization.images[root];
-    const auto offset = image.indirect_mapping_offset;
+    const auto offset = snapshot.flattened_srt[image.indirect_mapping_offset];
     Check(snapshot.images[root].dwords[0] == 0u && image.indirect_search_iterations == 2u &&
               snapshot.flattened_srt[offset] == 2u && snapshot.flattened_srt[offset + 1u] == 0u &&
               snapshot.flattened_srt[offset + 3u] == (root == 2u ? 12996u : 12994u) * 32u,
@@ -3662,7 +3662,7 @@ void TestIndexedMaterialImageKeys() {
             memory.selectors == 2u && memory.descriptors == 2u && snapshot.images.size() == 5u,
         "overflowed scalar immediate read a descriptor or lost valid wrapped keys");
   for (uint32_t root = 0; root < 2u; ++root) {
-    const auto offset = specialization.images[root].indirect_mapping_offset;
+    const auto offset = snapshot.flattened_srt[specialization.images[root].indirect_mapping_offset];
     Check(snapshot.images[root].dwords[0] == 0u && snapshot.flattened_srt[offset] == 2u &&
               snapshot.flattened_srt[offset + 1u] == 32u && snapshot.flattened_srt[offset + 3u] == UINT32_MAX &&
               snapshot.flattened_srt[offset + 4u] == 0u,
@@ -3792,7 +3792,7 @@ void TestPointerTableIndexedMaterialKeys() {
   Check(std::ranges::find(snapshot.specialization_reads, std::pair<uint64_t, uint64_t>{base + 20u, 52u}) !=
             snapshot.specialization_reads.end(),
         "pointer-table selector rows escaped writable-alias tracking");
-  const auto mapping = specialization.images[0].indirect_mapping_offset;
+  const auto mapping = snapshot.flattened_srt[specialization.images[0].indirect_mapping_offset];
   Check(snapshot.images[0].dwords[0] == 0x100u && specialization.images[0].indirect_search_iterations == 2u &&
             snapshot.flattened_srt[mapping] == 3u && snapshot.flattened_srt[mapping + 3u] == 5u &&
             snapshot.flattened_srt[mapping + 5u] == 9u,
@@ -4942,7 +4942,7 @@ void TestCountedRowImageSelector() {
       return;
     }
     if (expected.size() > 1u) {
-      const auto map = specialization.images[0].indirect_mapping_offset;
+      const auto map = snapshot.flattened_srt[specialization.images[0].indirect_mapping_offset];
       Check(snapshot.flattened_srt[map] == expected.size(), "counted-row mapping lost selected keys");
       for (uint32_t index = 0; index < expected.size(); ++index)
         Check(snapshot.flattened_srt[map + 1u + index * 2u] == expected[index],
@@ -7136,7 +7136,7 @@ void TestGpuSelectedBufferRecords() {
     }
     for (uint32_t member = 0; member < 2u; ++member) {
       const auto root = roots[member];
-      const auto mapping = specialization.buffers[root].indirect_mapping_offset;
+      const auto mapping = snapshot.flattened_srt[specialization.buffers[root].indirect_mapping_offset];
       Check(specialization.buffers[root].indirect_search_iterations == 0u &&
                 snapshot.flattened_srt[mapping] == 4u,
             "affine descriptor table lost its compact dense mapping");
@@ -7456,7 +7456,7 @@ void TestGpuSelectedFormattedRecordStore() {
               snapshot.buffers.size() == plan.info.buffers.size() + count,
           "exact formatted records read GPU selector bytes, row padding or stale candidates");
   }
-  const auto mapping = specialization.buffers[root].indirect_mapping_offset;
+  const auto mapping = snapshot.flattened_srt[specialization.buffers[root].indirect_mapping_offset];
   Check(snapshot.flattened_srt[mapping] == 6u, "exact formatted records lost the dense row map");
   for (uint32_t row = 0; row < 6u; ++row)
     Check(snapshot.flattened_srt[mapping + 1u + row] == row + 1u &&
@@ -7488,7 +7488,7 @@ void TestGpuSelectedFormattedRecordStore() {
   user_data[2] = 5u * 592u + 448u + 12u;
   memory.watched_address = memory.base + table_offset + 5u * 592u + 448u;
   Check(materialize() && memory.watched_dwords == 3u &&
-            snapshot.flattened_srt[specialization.buffers[root].indirect_mapping_offset] == 5u &&
+            snapshot.flattened_srt[snapshot.flattened_srt[specialization.buffers[root].indirect_mapping_offset]] == 5u &&
             snapshot.buffers.size() == plan.info.buffers.size() + 5u,
         "partial direct V# did not zero-fill its missing format DWORD");
   user_data[1] = 592u << 16u;
@@ -7565,7 +7565,7 @@ void TestGpuSelectedFormattedRecordStore() {
               snapshot.buffers.size() == wide_plan.info.buffers.size() + (populated ? 2u : 0u),
           "finite RGBA16 table read GPU keys or retained stale null/active candidates");
   }
-  const auto wide_mapping = specialization.buffers[wide_root].indirect_mapping_offset;
+  const auto wide_mapping = snapshot.flattened_srt[specialization.buffers[wide_root].indirect_mapping_offset];
   Check(snapshot.flattened_srt[wide_mapping] == 32u,
         "finite RGBA16 table lost its complete key map");
   for (uint32_t row = 0; row < 32u; ++row)
@@ -7876,7 +7876,7 @@ void TestGpuKeyedRawIndexedStore() {
     Check(root != UINT32_MAX, "large table lost its root");
     if (root != UINT32_MAX) {
       const auto& srt = second_snapshot.flattened_srt;
-      const auto mapping = second.buffers[root].indirect_mapping_offset;
+      const auto mapping = srt[second.buffers[root].indirect_mapping_offset];
       const auto length = srt[mapping];
       bool strides = true;
       for (const uint32_t row : {0u, 1u, 2u, 500u, 999u}) {

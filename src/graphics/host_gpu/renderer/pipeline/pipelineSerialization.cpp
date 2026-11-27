@@ -145,6 +145,16 @@ template <class Info> bool InputInfoFromBytes(std::span<const uint8_t> bytes, In
 	return true;
 }
 
+void SeedBufferLayoutClasses(ShaderRecompiler::IR::ResourceSpecialization&       target,
+                             const ShaderRecompiler::IR::ResourceSpecialization& source) {
+	if (source.buffer_layout_classes.empty()) return;
+	auto& classes = target.buffer_layout_classes;
+	classes.insert(classes.end(), source.buffer_layout_classes.begin(),
+	               source.buffer_layout_classes.end());
+	std::ranges::sort(classes);
+	classes.erase(std::unique(classes.begin(), classes.end()), classes.end());
+}
+
 } // namespace
 
 void ShaderStoreWriter::Open(const std::filesystem::path& path, std::span<const uint8_t> header,
@@ -296,6 +306,7 @@ bool PipelineCache::LoadRecord(std::span<const uint8_t>& records) {
 				ShaderRecompiler::IR::MergeRuntimeLayoutState(program->second.resource_plan, later);
 			}
 			module.module = CompileSPV(spirv, m_graphics.device);
+			SeedBufferLayoutClasses(program->second.specialization, module.specialization);
 			program->second.modules.push_back(std::move(module));
 			break;
 		}
@@ -534,8 +545,11 @@ void PipelineCache::RebuildFromRecipes(std::span<const std::vector<uint8_t>> rec
 			auto plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
 			plan.runtime_layout_min_candidates = recipe.min_candidates;
 			plan.runtime_layout_slots          = recipe.slots;
+			auto specialization = recipe.specialization;
+			ShaderRecompiler::IR::CanonicalizeIndirectMappingOffsets(translated.program,
+			                                                         specialization);
 			auto module = BuildModule(m_graphics, recipe.key, options, std::move(translated),
-			                          recipe.specialization, {}, recipe.push_data);
+			                          specialization, {}, recipe.push_data);
 			built[i].emplace(Built {.plan = std::move(plan), .module = std::move(module)});
 		} catch (...) {
 			// Resource tracking that fails (UnsupportedComputeShader) or anything else the
@@ -556,6 +570,14 @@ void PipelineCache::RebuildFromRecipes(std::span<const std::vector<uint8_t>> rec
 		} else {
 			ShaderRecompiler::IR::MergeRuntimeLayoutState(program->second.resource_plan, plan);
 		}
+		const bool duplicate = std::ranges::any_of(
+		    program->second.modules,
+		    [&](const ShaderModule& existing) { return existing.id == module.module.id; });
+		if (duplicate) {
+			m_graphics.device.destroyShaderModule(module.module.module, nullptr);
+			continue;
+		}
+		SeedBufferLayoutClasses(program->second.specialization, module.module.specialization);
 		StoreModule(program->first, program->second, module.module, module.spirv);
 		program->second.modules.push_back(std::move(module.module));
 		rebuilt++;
