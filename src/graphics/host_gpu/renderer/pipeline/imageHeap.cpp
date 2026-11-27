@@ -321,8 +321,30 @@ void ImageHeap::UpdateProbe(View& view, uint64_t probe) {
 	Assign(view, offset, kind == 0u ? 0u : Intern(view, kind, key));
 }
 
+void ImageHeap::RemoveOwner(uint32_t index, View* view, uint32_t slot) {
+	if (index == 0u) return;
+	auto& owners = m_elements[index].owners;
+	const SlotRef ref {view, slot};
+	for (size_t i = 0; i < owners.size(); ++i) {
+		if (owners[i] == ref) {
+			owners[i] = owners.back();
+			owners.pop_back();
+			return;
+		}
+	}
+}
+
 void ImageHeap::Assign(View& view, size_t slot, uint32_t entry) {
-	const auto previous = std::exchange(view.slots[slot], entry);
+	const auto previous   = std::exchange(view.slots[slot], entry);
+	const auto prev_index = previous & ElementMask;
+	const auto next_index = entry & ElementMask;
+	const auto slot32     = static_cast<uint32_t>(slot);
+	if (prev_index != next_index) {
+		RemoveOwner(prev_index, &view, slot32);
+		if (next_index != 0u) {
+			m_elements[next_index].owners.push_back({&view, slot32});
+		}
+	}
 	Release(previous);
 	if (previous != entry) Widen(view.dirty_begin, view.dirty_end, slot, slot + 1u);
 }
@@ -374,8 +396,12 @@ void ImageHeap::Retire() {
 
 // Unlists the element, so its descriptor interns a new one.
 void ImageHeap::Mark(uint32_t index, State state) {
-	auto& element = m_elements[index];
-	element.state = state;
+	auto&      element   = m_elements[index];
+	const bool was_live  = element.state == State::Live;
+	element.state        = state;
+	if (was_live && state != State::Live && !element.owners.empty()) {
+		m_marked.push_back(index);
+	}
 	if (const auto found = m_index.find(element.key);
 	    found != m_index.end() && found->second == index) {
 		m_index.erase(found);
@@ -399,18 +425,21 @@ bool ImageHeap::ForEachChanged(Fn&& fn) {
 
 // Moves the slots of every view off marked elements; pending draws keep reading those.
 void ImageHeap::Repoint() {
-	for (const auto& memory: m_memories) {
-		for (const auto& view: memory->views) {
-			for (uint64_t probe = 0; probe < view->count; ++probe) {
-				const auto  slot    = (view->first + probe * view->step) / 4u;
-				const auto& element = m_elements[view->slots[slot] & ElementMask];
-				if (element.state == State::Buried) {
-					memory->dead[slot] = Hash(element.key.value);
-					Assign(*view, slot, 0u);
-				} else if (element.state == State::Stale) {
-					const auto key = element.key; // Intern may grow m_elements.
-					Assign(*view, slot, Intern(*view, element.kind, key));
-				}
+	const auto marked = std::exchange(m_marked, {});
+	for (const auto index: marked) {
+		auto& element = m_elements[index];
+		if (element.owners.empty()) continue;
+		const auto state  = element.state;
+		const auto key    = element.key; // Intern may grow m_elements.
+		const auto kind   = element.kind;
+		auto       owners = std::move(element.owners);
+		element.owners.clear();
+		for (const auto [view, slot]: owners) {
+			if (state == State::Buried) {
+				view->memory.dead[slot] = Hash(key.value);
+				Assign(*view, slot, 0u);
+			} else if (state == State::Stale) {
+				Assign(*view, slot, Intern(*view, kind, key));
 			}
 		}
 	}
@@ -673,7 +702,10 @@ void ImageHeap::Drop(Memory& memory) {
 	for (auto& view: memory.views) {
 		std::erase(m_active, view.get());
 		for (uint64_t probe = 0; probe < view->count; ++probe) {
-			Release(view->slots[(view->first + probe * view->step) / 4u]);
+			const auto slot  = static_cast<uint32_t>((view->first + probe * view->step) / 4u);
+			const auto entry = view->slots[slot];
+			RemoveOwner(entry & ElementMask, view.get(), slot);
+			Release(entry);
 		}
 		if (scheduler.Active()) {
 			scheduler.DeferOperation([buffer = std::move(view->buffer)] {});

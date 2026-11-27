@@ -466,12 +466,12 @@ std::string HitchActivity(const Hitch& hitch) {
 	for (const auto& item: std::span(activity).first<2>()) {
 		add(item.ms >= std::max(1.0, hitch.ms * 0.1), Fmt("%s %.0f ms", item.name, item.ms));
 	}
-	const double uploads =
-	    (delta(Counter::TextureUploadBytes) + delta(Counter::BufferUploadBytes)) /
-	    (1024.0 * 1024.0);
+	const double tex_uploads = delta(Counter::TextureUploadBytes) / (1024.0 * 1024.0);
+	const double buf_uploads = delta(Counter::BufferUploadBytes) / (1024.0 * 1024.0);
+	const double uploads     = tex_uploads + buf_uploads;
 	const double reads = delta(Counter::GuestFileReadBytes) / (1024.0 * 1024.0);
 	add(delta(Counter::SwapchainRecreations) > 0, "swapchain rebuild");
-	add(uploads >= 8.0, Fmt("uploads %.0f MB", uploads));
+	add(uploads >= 8.0, Fmt("uploads %.0f MB (buf %.0f, tex %.0f)", uploads, buf_uploads, tex_uploads));
 	add(reads >= 1.0, Fmt("file reads %.0f MB", reads));
 	if (text.empty()) {
 		add(ms(Counter::GpuThreadBusyNs) >= std::max(1.0, hitch.ms * 0.1),

@@ -66,16 +66,25 @@ private:
 	// A stale element's slots move to a new element of its descriptor, a buried one's to null.
 	enum class State : uint8_t { Live, Stale, Buried };
 
-	struct Element {
-		Key      key;
-		ImageId  image;
-		uint64_t serial = 0; // Image::serial of image.
-		uint32_t kind   = 0;
-		uint32_t refs   = 0; // Slots of all views that select it.
-		State    state  = State::Live;
+	struct Memory;
+	struct View;
+
+	struct SlotRef {
+		View*    view = nullptr;
+		uint32_t slot = 0;
+
+		bool operator==(const SlotRef&) const = default;
 	};
 
-	struct Memory;
+	struct Element {
+		Key                  key;
+		ImageId              image;
+		uint64_t             serial = 0; // Image::serial of image.
+		uint32_t             kind   = 0;
+		uint32_t             refs   = 0; // Slots of all views that select it.
+		State                state  = State::Live;
+		std::vector<SlotRef> owners; // View slots currently selecting this element.
+	};
 
 	struct View {
 		Memory&                      memory;
@@ -113,6 +122,7 @@ private:
 	void     Drop(Memory& memory);
 	void     UpdateProbes(View& view, uint64_t begin, uint64_t end);
 	void     UpdateProbe(View& view, uint64_t probe);
+	void     RemoveOwner(uint32_t index, View* view, uint32_t slot);
 	void     Assign(View& view, size_t slot, uint32_t entry);
 	uint32_t Intern(View& view, uint32_t kind, const Key& key);
 	void     Release(uint32_t entry);
@@ -139,6 +149,7 @@ private:
 	std::unordered_map<Key, uint32_t, KeyHash>        m_index;
 	std::vector<uint32_t>                             m_free;
 	std::vector<uint32_t>                             m_pending;  // Not yet resolved.
+	std::vector<uint32_t>                             m_marked;   // Marked Stale/Buried awaiting Repoint.
 	std::vector<uint32_t>                             m_released; // Unselected after the upload.
 	std::vector<uint32_t>                             m_held; // Another extent holds the address.
 	std::vector<uint32_t>                             m_dcc;  // Metadata clears apply per draw.
