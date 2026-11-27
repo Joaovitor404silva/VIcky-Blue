@@ -9745,6 +9745,35 @@ void TestRepeatedBitcastPropagation() {
   }
 }
 
+void TestRepeatedSelectPropagation() {
+  using namespace ShaderRecompiler::IR;
+  Block entry;
+  IREmitter e(&entry);
+  const auto raw_condition = e.GetUserData(static_cast<ScalarReg>(0));
+  const auto condition = e.INotEqual(raw_condition, U32(Value(0u)));
+  const auto raw_true = e.GetUserData(static_cast<ScalarReg>(1));
+  const auto raw_false = e.GetUserData(static_cast<ScalarReg>(2));
+  const auto true_predicate = e.INotEqual(raw_true, U32(Value(0u)));
+  const auto false_predicate = e.INotEqual(raw_false, U32(Value(0u)));
+  const auto true_float = e.Emit(ValueOpcode::ConvertF32U32, {raw_true});
+  const auto false_float = e.Emit(ValueOpcode::ConvertF32U32, {raw_false});
+
+  const auto first_u1 = e.Emit(ValueOpcode::SelectU1, {true_predicate, true_predicate, false_predicate});
+  const auto duplicate_u1 = e.Emit(ValueOpcode::SelectU1, {true_predicate, true_predicate, false_predicate});
+  const auto first_u32 = e.Emit(ValueOpcode::SelectU32, {condition, raw_true, raw_false});
+  const auto duplicate_u32 = e.Emit(ValueOpcode::SelectU32, {condition, raw_true, raw_false});
+  const auto first_f32 = e.Emit(ValueOpcode::SelectF32, {condition, true_float, false_float});
+  const auto duplicate_f32 = e.Emit(ValueOpcode::SelectF32, {condition, true_float, false_float});
+  const auto reversed = e.Emit(ValueOpcode::SelectU32, {condition, raw_false, raw_true});
+
+  ConstantPropagationPass({&entry});
+  Check(duplicate_u1.Resolve() == first_u1 && duplicate_u32.Resolve() == first_u32 &&
+            duplicate_f32.Resolve() == first_f32,
+        "identical selects were not shared within their block");
+  Check(reversed.Resolve() == reversed,
+        "select commoning merged instructions with different value order");
+}
+
 void TestMaskedShiftConstantPropagation() {
   using namespace ShaderRecompiler::IR;
   for (const uint32_t count : {0u, 1u, 8u, 31u, 32u, 33u, 40u, 63u, 64u, UINT32_MAX}) {
@@ -13707,6 +13736,7 @@ int main() {
   TestLaneMaskProjection();
   TestLateConstantPropagation();
   TestRepeatedBitcastPropagation();
+  TestRepeatedSelectPropagation();
   TestMaskedShiftConstantPropagation();
   TestU64ShiftConstantPropagation();
   TestU64RegisterPairRoundTrip();
