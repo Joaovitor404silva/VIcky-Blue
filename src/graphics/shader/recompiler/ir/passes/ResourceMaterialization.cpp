@@ -250,6 +250,13 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 	    (!resource.formatted || Format::GetFormatInfo(descriptor.Format()).byte_size == 1u);
 	if (descriptor.SwizzleEnabled() || descriptor.AddTid() ||
 	    (descriptor.OutOfBounds() != (indexed ? 0u : 3u) && !byte_indexed)) {
+		// A row a read-only table can reach may hold plain data rather than a V#: the target title
+		// keeps floats next to its descriptors. Such a row has no stride, which no indexed record
+		// buffer has, so it reads as a null buffer; one with a stride is a real V# and still fails.
+		if (!resource.written && indexed && descriptor.Stride() == 0u) {
+			value.dwords.fill(0u);
+			return true;
+		}
 		return SpecializationFail(fmt::format(
 		    "indirect buffers require exact linear index or byte bounds: "
 		    "descriptor={:08x},{:08x},{:08x},{:08x} swizzle={} add_tid={} oob={} "

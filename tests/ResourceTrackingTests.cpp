@@ -6823,6 +6823,24 @@ void TestBoundedBufferRecords(uint32_t d32_components) {
                   snapshot.specialization_reads.end(),
               "record descriptor escaped same-dispatch overlap capture");
   }
+  // A reachable row of a read-only table can hold plain data (here floats, with no stride)
+  // instead of a V#; it reads as a null buffer instead of rejecting the whole table.
+  {
+    const auto row = (table_offset + 2u * 192u + 160u) / 4u;
+    const std::array<uint32_t, 4> saved{memory.words[row], memory.words[row + 1u],
+                                        memory.words[row + 2u], memory.words[row + 3u]};
+    for (const auto& garbage : {std::array<uint32_t, 4>{2u, 0u, 0x3f73ddebu, 0x3e9b6cbcu},
+                                std::array<uint32_t, 4>{0xbca24d63u, 0u, 0xbe9b5325u, 0x3f73ea4fu}}) {
+      std::ranges::copy(garbage, memory.words.begin() + row);
+      const bool nulled = materialize() && snapshot.buffers.size() == 8u &&
+          std::ranges::none_of(snapshot.buffers, [&](const auto& buffer) {
+            return buffer.dwords[2] == garbage[2] || buffer.dwords[3] == garbage[3];
+          });
+      Check(nulled, "a data row in a read-only buffer table rejected the table or was not nulled");
+    }
+    std::ranges::copy(saved, memory.words.begin() + row);
+    Check(materialize(), "restored record table no longer materialized");
+  }
   const auto original = specialization;
   memory.words[(table_offset + 160u) / 4u] += 0x100u;
   Check(materialize() && specialization == original,
