@@ -15,10 +15,9 @@
 #include <functional>
 #include <numeric>
 #include <unordered_map>
-
 #include <unordered_set>
+
 namespace Libs::Graphics::ShaderRecompiler::IR {
-namespace {
 
 namespace {
 uint32_t g_runtime_layout_min_candidates = 256u;
@@ -32,6 +31,7 @@ void SetRuntimeLayoutMinCandidatesForTests(uint32_t candidates) {
 	g_runtime_layout_min_candidates = candidates;
 }
 
+namespace {
 
 constexpr uint64_t AddressMask            = 0x0000ffffffffffffull;
 
@@ -637,8 +637,8 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 		}
 	};
 	std::unordered_map<DescriptorValue, uint32_t, CandidateHash> interned;
-		if (candidate == descriptors[resource_index]) return 0u;
 	const auto intern_candidate = [&](const DescriptorValue& candidate) {
+		if (candidate == descriptors[resource_index]) return 0u;
 		const auto ordinal = static_cast<uint32_t>(descriptors.size() - children_begin + 1u);
 		const auto [found, inserted] = interned.try_emplace(candidate, ordinal);
 		if (inserted) {
@@ -868,7 +868,6 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 				root.indirect_root = resource_index;
 				root.indirect_mapping_offset = static_cast<uint32_t>(mapping_offset);
 				root.indirect_search_iterations = 0u;
-			}
 				if constexpr (std::is_same_v<Specialization, ResourceSpecialization::Buffer>) {
 					// A large table keeps its candidates' layouts in runtime words after the
 					// mapping, one per ordinal (MaterializeResources fills them), and pads its
@@ -887,6 +886,7 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 						    snapshot.flattened_srt.size() + descriptors.size() - children_begin + 1u, 0u);
 					}
 				}
+			}
 			return true;
 		}
 		if (selector == nullptr) {
@@ -975,7 +975,6 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 		root.indirect_root              = resource_index;
 		root.indirect_mapping_offset = static_cast<uint32_t>(mapping_offset);
 		root.indirect_search_iterations = std::bit_width(key_count);
-	}
 		if constexpr (std::is_same_v<Specialization, ResourceSpecialization::Buffer>) {
 			// As for plain tables; the runtime words follow the key/ordinal pairs.
 			const auto children = static_cast<uint32_t>(descriptors.size() - children_begin);
@@ -991,6 +990,7 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 				    snapshot.flattened_srt.size() + descriptors.size() - children_begin + 1u, 0u);
 			}
 		}
+	}
 	return true;
 }
 
@@ -1802,11 +1802,8 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 					        program, base.source, i, 4u, 4u, observed, snapshot,
 					        snapshot.buffers, specialization.buffers,
 					        [&](DescriptorValue& value) {
-						        if (NormalizeIndirectBuffer(value, source->indirect_descriptor->indexed, base))
-							        return true;
-						        dbg_row_failed = true;
-						        return dbg_all_rows;
-					        }) || dbg_row_failed)
+						        return NormalizeIndirectBuffer(value, source->indirect_descriptor->indexed, base);
+					        }))
 						return resource_failed("buffer", i, base.source, snapshot.buffers.size());
 				}
 			} else if (!evaluate(base.source, snapshot.buffers[i])) {
@@ -1838,10 +1835,6 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		buffer.zero_stride_oob    = descriptor.OutOfBounds() == 0u && stride == 0u;
 		buffer.scalar_empty       = base.scalar && descriptor.GetSize() == 0u;
 	}
-	snapshot.images.resize(program.info.images.size());
-	specialization.images.resize(program.info.images.size());
-	for (uint32_t i = 0; i < program.info.images.size(); ++i) {
-		const auto& image = program.info.images[i];
 	// Runtime-layout tables: each ordinal's word is its layout class among its root's classes,
 	// with the stride in the high half; the candidates' own entries become canonical.
 	{
@@ -1886,6 +1879,10 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 			                                            classes.begin(), classes.end());
 		}
 	}
+	snapshot.images.resize(program.info.images.size());
+	specialization.images.resize(program.info.images.size());
+	for (uint32_t i = 0; i < program.info.images.size(); ++i) {
+		const auto& image = program.info.images[i];
 		specialization.images[i] = {
 		    .numeric_class = image.numeric_class,
 		    .dimension = image.dimension,
@@ -2042,10 +2039,6 @@ void ApplyResourceSpecialization(Program& program, const ResourceSpecialization&
 			buffers[root].indirect_resources.push_back(index);
 		}
 	}
-	auto& images = program.info.images;
-	const auto original_image_count = images.size();
-	images.reserve(specialization.images.size());
-	for (uint32_t index = 0; index < specialization.images.size(); index++) {
 	// A runtime-layout table's first candidates represent its layout classes.
 	for (uint32_t index = 0; index < original_buffer_count; ++index) {
 		auto& root = buffers[index];
@@ -2063,6 +2056,10 @@ void ApplyResourceSpecialization(Program& program, const ResourceSpecialization&
 		}
 		EXIT_IF(root.runtime_layout_classes == 0u);
 	}
+	auto& images = program.info.images;
+	const auto original_image_count = images.size();
+	images.reserve(specialization.images.size());
+	for (uint32_t index = 0; index < specialization.images.size(); index++) {
 		const auto& source = specialization.images[index];
 		if (index >= images.size()) {
 			EXIT_IF(source.indirect_root >= original_image_count);
