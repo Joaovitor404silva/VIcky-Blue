@@ -1153,6 +1153,66 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 					                                   op == IR::ValueOpcode::ImageAtomicFMax32);
 				                               });
 			           }
+			           if (image.atomic_bits == 8u || image.atomic_bits == 16u) {
+				           const uint32_t bits = image.atomic_bits;
+				           const auto     mask = ConstantU32(state, (1u << bits) - 1u);
+				           const auto     u32  = TypeU32(state);
+				           const auto     sext = [&](uint32_t v) {
+					           const auto e = state.builder.AllocateId();
+					           state.builder.AddFunction(spv::OpBitFieldSExtract, u32, e, v,
+					                                     ConstantU32(state, 0u),
+					                                     ConstantU32(state, bits));
+					           return e;
+				           };
+				           const auto old = AtomicUpdate(
+				               state, pointer, IR::ResourceKind::Image, [&](uint32_t current) {
+					               const auto cur = Binary(state, spv::OpBitwiseAnd, u32, current, mask);
+					               const auto arg = Binary(state, spv::OpBitwiseAnd, u32,
+					                                       ctx.Arg(inst, inst.NumArgs() - 2), mask);
+					               uint32_t next = cur;
+					               switch (op) {
+						               case IR::ValueOpcode::ImageAtomicCompareSwap32: {
+							               const auto desired = Binary(
+							                   state, spv::OpBitwiseAnd, u32,
+							                   ctx.Arg(inst, inst.NumArgs() - 3), mask);
+							               const auto eq =
+							                   Binary(state, spv::OpIEqual, TypeBool(state), cur, arg);
+							               next = Select(state, u32, eq, desired, cur);
+							               break;
+						               }
+						               case IR::ValueOpcode::ImageAtomicSwap32: next = arg; break;
+						               case IR::ValueOpcode::ImageAtomicIAdd32:
+							               next = Binary(state, spv::OpIAdd, u32, cur, arg);
+							               break;
+						               case IR::ValueOpcode::ImageAtomicSMin32:
+							               next = EmitGlsl<GLSLstd450SMin, IR::Type::U32>(
+							                   state, sext(cur), sext(arg));
+							               break;
+						               case IR::ValueOpcode::ImageAtomicSMax32:
+							               next = EmitGlsl<GLSLstd450SMax, IR::Type::U32>(
+							                   state, sext(cur), sext(arg));
+							               break;
+						               case IR::ValueOpcode::ImageAtomicUMin32:
+							               next = EmitGlsl<GLSLstd450UMin, IR::Type::U32>(state, cur, arg);
+							               break;
+						               case IR::ValueOpcode::ImageAtomicUMax32:
+							               next = EmitGlsl<GLSLstd450UMax, IR::Type::U32>(state, cur, arg);
+							               break;
+						               case IR::ValueOpcode::ImageAtomicAnd32:
+							               next = Binary(state, spv::OpBitwiseAnd, u32, cur, arg);
+							               break;
+						               case IR::ValueOpcode::ImageAtomicOr32:
+							               next = Binary(state, spv::OpBitwiseOr, u32, cur, arg);
+							               break;
+						               case IR::ValueOpcode::ImageAtomicXor32:
+							               next = Binary(state, spv::OpBitwiseXor, u32, cur, arg);
+							               break;
+						               default: ctx.Fail(inst, "unsupported narrow image atomic"); break;
+					               }
+					               return Binary(state, spv::OpBitwiseAnd, u32, next, mask);
+				               });
+				           return Binary(state, spv::OpBitwiseAnd, u32, old, mask);
+			           }
 			           const auto old = EmitAtomicOperation(ctx, inst, pointer, spv::ScopeDevice);
 			           EmitAtomicMemoryBarrier(state, IR::ResourceKind::Image);
 			           return old;

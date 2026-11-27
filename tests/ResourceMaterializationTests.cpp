@@ -1322,7 +1322,8 @@ void TestSignedStorageSpecialization() {
           "signed raw storage view accepted a non-atomic read/write image");
     image.atomic = true;
     Check((RawSignedStorageFormat(image, format) != F::kInvalid) == (format == F::k32SInt) &&
-              MaterializeResources(plan, runtime, snapshot, specialization) == (format == F::k32SInt),
+              MaterializeResources(plan, runtime, snapshot, specialization) &&
+              specialization.images[0].atomic_bits == (format == F::k32SInt ? 0u : format == F::k8SInt ? 8u : 16u),
           "signed storage conversion changed atomic format eligibility");
     image.atomic64 = true;
     Check(RawSignedStorageFormat(image, format) == F::kInvalid &&
@@ -1397,6 +1398,18 @@ void TestUnreachedImageIgnoresSharedDescriptor(bool atomic64) {
   data[1] = 1u;
   Check(!MaterializeResources(plan, runtime, snapshot, specialization),
         "reached atomic image accepted a format its width rejects");
+  // 8-bit and 16-bit formats are accepted for 32-bit atomics (shadowed through R32Uint) and
+  // rejected for 64-bit atomics. k8SInt is left out: images 0 and 2 share this descriptor as
+  // write-only storage, which has no 8-bit signed view (signed atomics are covered elsewhere).
+  for (const auto format : {BufferFormat::k8UInt, BufferFormat::k8UNorm, BufferFormat::k16UInt,
+                            BufferFormat::k16SInt, BufferFormat::k16Float}) {
+    const uint8_t expected_bits =
+        (format == BufferFormat::k8UInt || format == BufferFormat::k8UNorm) ? 8u : 16u;
+    data[0] = uint32_t(format) << 20u;
+    const bool ok = MaterializeResources(plan, runtime, snapshot, specialization);
+    Check(ok == !atomic64 && (!ok || specialization.images[1].atomic_bits == expected_bits),
+          "narrow atomic image format specialization mismatch");
+  }
 }
 
 void TestIndirectImageSamplerClasses(bool mixed) {

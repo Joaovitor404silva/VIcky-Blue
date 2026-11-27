@@ -1005,15 +1005,19 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 		image.cube      = DescriptorIsCube(descriptor);
 		const auto format =
 		    static_cast<Prospero::BufferFormat>((descriptor.dwords[1] >> 20u) & 0x1ffu);
+		const uint8_t narrow_atomic_bits =
+		    base.atomic && !base.atomic64 ? AtomicImageBits(format) : 0u;
 		if (base.atomic &&
 		    (base.atomic64 ? format != Prospero::BufferFormat::k32_32UInt
-		                   : format != Prospero::BufferFormat::k32UInt &&
+		                   : narrow_atomic_bits == 0u &&
+		                         format != Prospero::BufferFormat::k32UInt &&
 		                         format != Prospero::BufferFormat::k32SInt &&
 		                         format != Prospero::BufferFormat::k32Float)) {
 			return SpecializationFail(
 			    fmt::format("atomic image descriptor {} uses unsupported format {}", i,
 			                static_cast<uint32_t>(format)));
 		}
+		image.atomic_bits = narrow_atomic_bits;
 		const bool storage      = base.resource_class == ImageResourceClass::Storage;
 		image.fmask             = Prospero::IsFmaskTextureFormat(format);
 		if (image.fmask) {
@@ -1065,7 +1069,8 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 			    !ValidatePackedUnormSampling(program, snapshot, i)) return false;
 		}
 		if (storage) {
-			if ((!raw_sint_storage && image.numeric_class == Prospero::TextureNumericClass::Sint) ||
+			if ((!raw_sint_storage && image.atomic_bits == 0u &&
+			     image.numeric_class == Prospero::TextureNumericClass::Sint) ||
 			    image.numeric_class == Prospero::TextureNumericClass::Unsupported) {
 				return SpecializationFail(
 				    fmt::format("storage image descriptor {} uses unsupported format {}", i,
@@ -1944,6 +1949,7 @@ void ApplyResourceSpecialization(Program& program, const ResourceSpecialization&
 		image.cube                       = source.cube;
 		image.skip_degamma               = source.skip_degamma;
 		image.heap                       = source.heap;
+		image.atomic_bits                = source.atomic_bits;
 		image.indirect_resources.clear();
 	}
 	for (uint32_t index = 0; index < images.size(); index++) {

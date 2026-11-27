@@ -49393,6 +49393,73 @@ constexpr ImageAtomicIntegerCase ImageAtomicIntegerCases[] = {
      {0xfffffffeu, 0xfffffffeu, 0xffffffffu, 0xfffffffeu, 0xffffffffu}},
 };
 
+TestCase ImageAtomicNarrowInteger(bool is_16bit) {
+  using F = Prospero::BufferFormat;
+  const u32 mask = is_16bit ? 0xffffu : 0xffu;
+  TestCase test;
+  test.name = is_16bit ? "ImageAtomicNarrow16Bit" : "ImageAtomicNarrow8Bit";
+  test.user_data = MakeStorageTextureData(is_16bit ? F::k16UInt : F::k8UInt);
+  test.has_user_data = true;
+  test.storage_image_r32ui.assign(16, 0);
+  test.expected_storage_image_r32ui.assign(16, 0);
+  auto &code = test.code;
+
+  // Texel 0: wrapping ADD (8-bit: 0xfa + 0x10 = 0x0a; 16-bit: 0xfff0 + 0x20 = 0x0010).
+  const u32 add_old = is_16bit ? 0xfff0u : 0xfau;
+  const u32 add_arg = is_16bit ? 0x0020u : 0x10u;
+  const u32 add_res = (add_old + add_arg) & mask;
+  test.storage_image_r32ui[0] = add_old;
+  test.expected_storage_image_r32ui[0] = add_res;
+  AppendVMovU32(&code, 0, 0);
+  AppendVMovU32(&code, 1, 0);
+  AppendVMovLiteral(&code, 2, add_arg);
+  code.push_back(EncodeMimg0(0x11, 1u, 0, true)); // IMAGE_ATOMIC_ADD
+  code.push_back(EncodeMimg1(2, 0));
+  AppendStoreVgpr(&code, 2, 0);
+  test.expected.push_back(add_old);
+
+  // Texel 1: signed SMIN (-2 vs +1 => -2 masked to 8/16 bits).
+  const u32 smin_old = is_16bit ? 0x0001u : 0x01u;
+  const u32 smin_arg = is_16bit ? 0xfffeu : 0xfeu;
+  test.storage_image_r32ui[1] = smin_old;
+  test.expected_storage_image_r32ui[1] = smin_arg;
+  AppendVMovU32(&code, 0, 1);
+  AppendVMovU32(&code, 1, 0);
+  AppendVMovLiteral(&code, 2, smin_arg);
+  code.push_back(EncodeMimg0(0x14, 1u, 0, true)); // IMAGE_ATOMIC_SMIN
+  code.push_back(EncodeMimg1(2, 0));
+  AppendStoreVgpr(&code, 2, 1);
+  test.expected.push_back(smin_old);
+
+  // Texel 2: UMAX with upper garbage bits ignored (0x12340005 vs 0x0012 -> 0x12).
+  const u32 umax_old = 0x05u;
+  const u32 umax_arg = 0x12340012u;
+  test.storage_image_r32ui[2] = umax_old;
+  test.expected_storage_image_r32ui[2] = 0x12u;
+  AppendVMovU32(&code, 0, 2);
+  AppendVMovU32(&code, 1, 0);
+  AppendVMovLiteral(&code, 2, umax_arg);
+  code.push_back(EncodeMimg0(0x17, 1u, 0, true)); // IMAGE_ATOMIC_UMAX
+  code.push_back(EncodeMimg1(2, 0));
+  AppendStoreVgpr(&code, 2, 2);
+  test.expected.push_back(umax_old);
+
+  // Texel 3: OR.
+  test.storage_image_r32ui[3] = 0x0au;
+  test.expected_storage_image_r32ui[3] = is_16bit ? 0x0a5au : 0x5au;
+  AppendVMovU32(&code, 0, 3);
+  AppendVMovU32(&code, 1, 0);
+  AppendVMovLiteral(&code, 2, is_16bit ? 0x0a50u : 0x50u);
+  code.push_back(EncodeMimg0(0x19, 1u, 0, true)); // IMAGE_ATOMIC_OR
+  code.push_back(EncodeMimg1(2, 0));
+  AppendStoreVgpr(&code, 2, 3);
+  test.expected.push_back(0x0au);
+
+  code.push_back(EncodeSopp(0x01, 0)); // s_endpgm
+  test.initial.assign(test.expected.size(), 0xdeadbeefu);
+  return test;
+}
+
 TestCase ImageAtomicIntegerGlcAndExec(const ImageAtomicIntegerCase &atomic, bool wide) {
   const u32 texel_dwords = wide ? 2 : 1;
   TestCase test;
@@ -51103,6 +51170,8 @@ std::vector<TestCase> MakeCases() {
     cases.push_back(ImageAtomicIntegerGlcAndExec(atomic, false));
     cases.push_back(ImageAtomicIntegerGlcAndExec(atomic, true));
   }
+  cases.push_back(ImageAtomicNarrowInteger(false));
+  cases.push_back(ImageAtomicNarrowInteger(true));
   AddCase(ImageAtomicFloatGlcAndExec<true>);
   AddCase(ImageAtomicFloatGlcAndExec<false>);
   AddCase(ImageAtomicFloatSpecialValues<true>);
@@ -53736,7 +53805,7 @@ ShaderTextureResource AtomicStorageTextureDescriptor() {
     descriptor = AtomicStorageTextureDescriptor();
     descriptor.fields[1] =
         (descriptor.fields[1] & ~0x1ff00000u) |
-        (static_cast<uint32_t>(Prospero::BufferFormat::k8UInt) << 20u);
+        (static_cast<uint32_t>(Prospero::BufferFormat::k8_8_8_8UInt) << 20u);
   } else if (std::strcmp(kind, "depth-tile-read") == 0) {
     resource = Ppsa14053DepthTileStorageTextureResource();
     descriptor = Ppsa14053DepthTileStorageTextureDescriptor();
@@ -54175,6 +54244,26 @@ void CheckBasicStorageTextureDescriptor() {
               atomic.DstSelXYZW() == DstSel(4, 0, 0, 1),
           "PPSA22102 image-atomic descriptor fixture is malformed");
   ValidateStorageTexture(AtomicStorageTextureResource(), atomic, 0x10000);
+  for (const auto format : {Prospero::BufferFormat::k8UInt, Prospero::BufferFormat::k8SInt,
+                            Prospero::BufferFormat::k8UNorm, Prospero::BufferFormat::k16UInt,
+                            Prospero::BufferFormat::k16SInt, Prospero::BufferFormat::k16Float}) {
+    auto narrow = atomic;
+    narrow.fields[1] =
+        (narrow.fields[1] & ~0x1ff00000u) | (static_cast<uint32_t>(format) << 20u);
+    ValidateStorageTexture(AtomicStorageTextureResource(), narrow, 0x10000);
+    // The binding view (used by metadata clears on the guest image) must stay on the image's
+    // own width; an R32Uint view of an R8/R16 image is invalid.
+    auto narrow_resource = AtomicStorageTextureResource();
+    narrow_resource.atomic_bits = ShaderRecompiler::IR::AtomicImageBits(format);
+    Require("BasicStorageTexture", "narrow atomic binding view",
+            StorageViewFormat(narrow_resource, format, VulkanFormat(format)) ==
+                VulkanFormat(format),
+            "narrow atomic image binding took an R32Uint view of its 8/16-bit image");
+  }
+  Require("BasicStorageTexture", "32-bit atomic binding view",
+          StorageViewFormat(AtomicStorageTextureResource(), Prospero::BufferFormat::k32UInt,
+                            vk::Format::eR32Uint) == vk::Format::eR32Uint,
+          "32-bit atomic image binding lost its R32Uint view");
 
   char path[MAX_PATH]{};
   Require("BasicStorageTexture", "host",
@@ -59060,6 +59149,8 @@ int main(int argc, char **argv) {
       RunCase(&vulkan, ImageAtomicIntegerGlcAndExec(atomic, false));
       RunCase(&vulkan, ImageAtomicIntegerGlcAndExec(atomic, true));
     }
+    RunCase(&vulkan, ImageAtomicNarrowInteger(false));
+    RunCase(&vulkan, ImageAtomicNarrowInteger(true));
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--ds-ordered-count-only") == 0) {

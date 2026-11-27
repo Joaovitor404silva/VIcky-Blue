@@ -63,6 +63,8 @@ public:
 	[[nodiscard]] ImageId       FindImageFromRange(uint64_t address, uint64_t size,
 	                                               bool ensure_valid = true);
 	[[nodiscard]] vk::ImageView FindTexture(ImageId id, const ImageDesc& desc);
+	[[nodiscard]] vk::ImageView AcquireAtomicShadow(ImageId id, const ImageDesc& desc, uint8_t bits);
+	void                        CommitAtomicShadows();
 	[[nodiscard]] vk::ImageView FindRenderTarget(ImageId id, const ImageDesc& desc);
 	[[nodiscard]] vk::ImageView FindDepthTarget(ImageId id, const ImageDesc& desc);
 	[[nodiscard]] Image&        GetImage(ImageId id) {
@@ -113,6 +115,12 @@ private:
 	struct WriteBack {
 		GuestRange range;
 		uint64_t   tick;
+	};
+
+	struct ActiveAtomicShadow {
+		ImageId       id;
+		ImageViewInfo view_info;
+		uint8_t       bits = 0;
 	};
 
 	// PS5: guest addresses span 44 bits, so an entry keeps the whole image address.
@@ -278,6 +286,7 @@ private:
 	std::unordered_set<ImageId>                       m_download_images;
 	std::mutex                                        m_write_back_mutex;
 	std::vector<WriteBack>                            m_write_backs;
+	std::vector<ActiveAtomicShadow>                   m_active_atomic_shadows;
 	std::map<uint64_t, MetaDataInfo>                  m_surface_metas;
 	uint64_t                                          m_total_used_memory  = 0;
 	uint64_t                                          m_trigger_gc_memory  = 0;

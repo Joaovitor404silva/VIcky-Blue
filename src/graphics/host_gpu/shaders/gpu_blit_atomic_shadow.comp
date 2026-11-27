@@ -1,0 +1,23 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+#ifdef IS_3D
+layout(set = 0, binding = 0, SRC_FMT) uniform readonly uimage3D src_img;
+layout(set = 0, binding = 1, DST_FMT) uniform writeonly uimage3D dst_img;
+#else
+layout(set = 0, binding = 0, SRC_FMT) uniform readonly uimage2DArray src_img;
+layout(set = 0, binding = 1, DST_FMT) uniform writeonly uimage2DArray dst_img;
+#endif
+
+layout(push_constant) uniform Params {
+	uvec3 extent;
+};
+
+void main() {
+	uvec3 p = gl_GlobalInvocationID;
+	if (p.x >= extent.x || p.y >= extent.y || p.z >= extent.z) {
+		return;
+	}
+	imageStore(dst_img, ivec3(p), imageLoad(src_img, ivec3(p)));
+}

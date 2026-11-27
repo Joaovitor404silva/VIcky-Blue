@@ -73,6 +73,10 @@ template <typename T>
                                                    bool r128 = false);
 void ValidateStorageTexture(const ShaderRecompiler::IR::ImageResource& resource,
                             const ShaderTextureResource& descriptor, uint64_t size);
+// The view format of a storage image binding. A narrow (8/16-bit) atomic image keeps its native
+// view; only its R32Uint shadow is viewed as R32Uint.
+[[nodiscard]] vk::Format StorageViewFormat(const ShaderRecompiler::IR::ImageResource& resource,
+                                           Prospero::BufferFormat format, vk::Format pixel_format);
 
 } // namespace Libs::Graphics
 
