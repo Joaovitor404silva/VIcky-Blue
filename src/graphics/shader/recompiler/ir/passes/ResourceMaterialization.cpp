@@ -1005,8 +1005,11 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 		image.cube      = DescriptorIsCube(descriptor);
 		const auto format =
 		    static_cast<Prospero::BufferFormat>((descriptor.dwords[1] >> 20u) & 0x1ffu);
+		// The R32_UINT shadow is single-sampled, so multisampled narrow images stay unsupported.
+		const bool multisampled = descriptor_dimension == Decoder::ImageDimension::Dim2DMsaa ||
+		                          descriptor_dimension == Decoder::ImageDimension::Dim2DMsaaArray;
 		const uint8_t narrow_atomic_bits =
-		    base.atomic && !base.atomic64 ? AtomicImageBits(format) : 0u;
+		    base.atomic && !base.atomic64 && !multisampled ? AtomicImageBits(format) : 0u;
 		// Image atomics act on texel bits through an unsigned view of the same width; 8- and
 		// 16-bit images run 32-bit atomics on an R32_UINT shadow.
 		if (base.atomic &&
