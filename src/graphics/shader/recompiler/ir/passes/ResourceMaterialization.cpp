@@ -2097,10 +2097,11 @@ void CanonicalizeIndirectMappingOffsets(const Program&          program,
 		}
 	}
 	const auto orig_images = std::min(program.info.images.size(), specialization.images.size());
-	for (uint32_t i = 0; i < orig_images; ++i) {
-		if (specialization.images[i].indirect_root == i) {
+	for (uint32_t i = 0; i < specialization.images.size(); ++i) {
+		const auto root = specialization.images[i].indirect_root;
+		if (root < orig_images && (i == root || specialization.images[i].heap)) {
 			specialization.images[i].indirect_mapping_offset =
-			    IndirectMappingDirectorySlot(program, 1u, i);
+			    IndirectMappingDirectorySlot(program, 1u, root);
 		}
 	}
 	const auto orig_samplers = std::min(program.info.samplers.size(), specialization.samplers.size());
