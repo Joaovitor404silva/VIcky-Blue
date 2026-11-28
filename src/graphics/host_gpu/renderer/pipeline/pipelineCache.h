@@ -290,7 +290,9 @@ private:
 		Pipeline                       layouts;
 		std::function<void(Pipeline&)> build;
 	};
-	static constexpr uint32_t                      OptimizerThreads   = 2;
+	// Background optimizer workers: all but two hardware threads (the render and guest threads
+	// keep theirs), 2 to 12; KYTY_PIPELINE_OPT_THREADS overrides.
+	uint32_t                                       m_optimizer_threads = 2;
 	static constexpr auto                          OptimizerIdleDelay = std::chrono::milliseconds(500);
 	std::shared_ptr<OptimizedBuilds>               m_optimized;
 	std::unique_ptr<Common::AsyncJobs<bool>>       m_optimizer;

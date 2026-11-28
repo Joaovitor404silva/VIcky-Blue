@@ -543,6 +543,12 @@ PipelineCache::PipelineCache(GraphicContext&                         graphics,
 	if (const char* text = std::getenv("KYTY_PIPELINE_FAST_BUILD"); text != nullptr) {
 		m_fast_build = std::string_view(text) != "0";
 	}
+	const auto hardware = std::max(std::thread::hardware_concurrency(), 1u);
+	m_optimizer_threads = std::clamp(hardware > 2u ? hardware - 2u : 1u, 2u, 12u);
+	if (const char* text = std::getenv("KYTY_PIPELINE_OPT_THREADS"); text != nullptr) {
+		const auto requested = std::strtoul(text, nullptr, 10);
+		if (requested >= 1u && requested <= 64u) m_optimizer_threads = static_cast<uint32_t>(requested);
+	}
 	InitializeDriverCache();
 	WarmUp(shader_store);
 }
@@ -581,13 +587,13 @@ void PipelineCache::PromoteOptimized() {
 		}
 		m_optimized->finished.clear();
 	}
-	if (m_pending_optimizations.empty() || m_optimizing_in_flight >= OptimizerThreads) return;
+	if (m_pending_optimizations.empty() || m_optimizing_in_flight >= m_optimizer_threads) return;
 	if (std::chrono::steady_clock::now() - m_last_cold_build < OptimizerIdleDelay) return;
 	if (m_optimizer == nullptr) {
 		m_optimized = std::make_shared<OptimizedBuilds>();
-		m_optimizer = std::make_unique<Common::AsyncJobs<bool>>(OptimizerThreads);
+		m_optimizer = std::make_unique<Common::AsyncJobs<bool>>(m_optimizer_threads);
 	}
-	while (!m_pending_optimizations.empty() && m_optimizing_in_flight < OptimizerThreads) {
+	while (!m_pending_optimizations.empty() && m_optimizing_in_flight < m_optimizer_threads) {
 		auto pending = std::move(m_pending_optimizations.front());
 		m_pending_optimizations.pop_front();
 		m_optimizing_in_flight++;
