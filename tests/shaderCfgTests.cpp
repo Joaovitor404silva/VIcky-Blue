@@ -12,6 +12,7 @@
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
+#include "graphics/shader/recompiler/backend/spirv/SpirvOutliner.h"
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
 #include "graphics/shader/recompiler/frontend/cfg/ShaderCFG.h"
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
@@ -14145,6 +14146,76 @@ int main() {
   TestNewShaderRecompilerUnsupportedMemoryDecode();
 
   TestNewShaderRecompilerVop3LaneReadDestinationEncoding();
+
+  {
+    Libs::Graphics::ShaderRecompiler::Spirv::Builder b;
+    b.RequireCapability(spv::CapabilityShader);
+    b.AddMemoryModel(spv::AddressingModelLogical, spv::MemoryModelGLSL450);
+    const auto void_t = b.Type(spv::OpTypeVoid);
+    const auto bool_t = b.Type(spv::OpTypeBool);
+    const auto u32_t  = b.Type(spv::OpTypeInt, 32u, 0u);
+    const auto fn_t   = b.Type(spv::OpTypeFunction, void_t);
+    const auto c0     = b.Constant(spv::OpConstant, u32_t, 0u);
+    const auto c1     = b.Constant(spv::OpConstant, u32_t, 1u);
+    const auto c2     = b.Constant(spv::OpConstant, u32_t, 2u);
+    const auto c3     = b.Constant(spv::OpConstant, u32_t, 3u);
+    const auto main_f = b.AllocateId();
+    b.AddEntryPoint(spv::ExecutionModelGLCompute, main_f, "main", {});
+    b.AddExecutionMode(main_f, spv::ExecutionModeLocalSize, 1u, 1u, 1u);
+    b.AddFunction(spv::OpFunction, void_t, main_f, spv::FunctionControlMaskNone, fn_t);
+    b.AddFunction(spv::OpLabel, b.AllocateId());
+
+    auto emit_sese = [&](uint32_t seed) {
+      const auto cond = b.AllocateId();
+      b.AddFunction(spv::OpINotEqual, bool_t, cond, seed, c0);
+      const auto then_l  = b.AllocateId();
+      const auto else_l  = b.AllocateId();
+      const auto merge_l = b.AllocateId();
+      b.AddFunction(spv::OpSelectionMerge, merge_l, spv::SelectionControlMaskNone);
+      b.AddFunction(spv::OpBranchConditional, cond, then_l, else_l);
+      b.AddFunction(spv::OpLabel, then_l);
+      uint32_t tv = seed;
+      for (int k = 0; k < 20; ++k) {
+        const auto nxt = b.AllocateId();
+        b.AddFunction(spv::OpIAdd, u32_t, nxt, tv, c1);
+        tv = nxt;
+      }
+      b.AddFunction(spv::OpBranch, merge_l);
+      b.AddFunction(spv::OpLabel, else_l);
+      uint32_t ev = seed;
+      for (int k = 0; k < 20; ++k) {
+        const auto nxt = b.AllocateId();
+        b.AddFunction(spv::OpBitwiseXor, u32_t, nxt, ev, c2);
+        ev = nxt;
+      }
+      b.AddFunction(spv::OpBranch, merge_l);
+      b.AddFunction(spv::OpLabel, merge_l);
+      const auto phi = b.AllocateId();
+      b.AddFunction(spv::OpPhi, u32_t, phi, tv, then_l, ev, else_l);
+      return phi;
+    };
+
+    const auto s1 = b.AllocateId();
+    b.AddFunction(spv::OpIAdd, u32_t, s1, c1, c2);
+    const auto s2 = b.AllocateId();
+    b.AddFunction(spv::OpIAdd, u32_t, s2, c2, c3);
+    const auto r1  = emit_sese(s1);
+    const auto r2  = emit_sese(s2);
+    const auto sum = b.AllocateId();
+    b.AddFunction(spv::OpIAdd, u32_t, sum, r1, r2);
+    b.AddFunction(spv::OpReturn);
+    b.AddFunction(spv::OpFunctionEnd);
+
+    auto words = b.Build();
+    CheckSpirvBinaryValidates(words);
+    const size_t before_words = words.size();
+    Libs::Graphics::ShaderRecompiler::Spirv::OutlineRepeatedRegions(words, 0u);
+    CheckSpirvBinaryValidates(words);
+    Check(words.size() < before_words, "SPIR-V outliner should shrink repeated SESE regions");
+    const auto text = DisassembleSpirvBinary(words);
+    Check(text.find("DontInline") != std::string::npos,
+          "SPIR-V outliner should mark outlined function DontInline");
+  }
 
   return 0;
 }

@@ -683,9 +683,47 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 			     stage, ir.shader_hash, traced);
 		}
 	}
-	const auto* workgroup = ShaderWorkgroupInput(ir.stage, options.input_info);
-	const bool  single_lane =
-	    !(workgroup != nullptr && ir.wave_size == 64u && workgroup->host_subgroup_size == 32u);
+	const auto* workgroup   = ShaderWorkgroupInput(ir.stage, options.input_info);
+	auto        can_single_lane = [&]() {
+        if (workgroup == nullptr || ir.wave_size != 64u || workgroup->host_subgroup_size != 32u) {
+            return true;
+        }
+        if (ir.stage != ShaderType::Compute || ir.info.uses_lds) {
+            return false;
+        }
+        for (const auto* block: ir.blocks) {
+            for (const auto& inst: *block) {
+                if (IR::SharedAccessOf(inst.GetOpcode()) != IR::SharedAccess::None) {
+                    return false;
+                }
+                switch (inst.GetOpcode()) {
+                    case IR::ValueOpcode::StoreCompletion:
+                    case IR::ValueOpcode::Ballot:
+                    case IR::ValueOpcode::LiveMask:
+                    case IR::ValueOpcode::SubgroupReduceU32:
+                    case IR::ValueOpcode::DppMoveU32:
+                    case IR::ValueOpcode::DppUpdateU32:
+                    case IR::ValueOpcode::ReadFirstLane:
+                    case IR::ValueOpcode::ReadLane:
+                    case IR::ValueOpcode::WriteLane:
+                    case IR::ValueOpcode::SwizzleU32:
+                    case IR::ValueOpcode::Permlane16U32:
+                    case IR::ValueOpcode::PermuteU32:
+                    case IR::ValueOpcode::BpermuteU32:
+                    case IR::ValueOpcode::LaneId: return false;
+                    case IR::ValueOpcode::ConditionRef:
+                        if (inst.Flags<CFG::BranchCondition>() !=
+                            CFG::BranchCondition::ScalarInstruction) {
+                            return false;
+                        }
+                        break;
+                    default: break;
+                }
+            }
+        }
+        return true;
+	};
+	const bool single_lane = can_single_lane();
 	if (IR::LowerDivergentExecRegions(ir, single_lane)) {
 		IR::ConstantPropagationPass(ir.blocks, ir.wave_size);
 		IR::RemoveIdentities(ir);

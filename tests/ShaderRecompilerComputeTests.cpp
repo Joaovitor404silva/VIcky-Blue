@@ -44800,7 +44800,8 @@ void CheckDynamicSampleOffsets(VulkanHarness &vulkan, u32 wave_size) {
   auto compiled = CompileCase(test, vulkan.SubgroupSize());
   spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
   std::string text;
-  const auto halves = wave_size > vulkan.SubgroupSize() ? 2u : 1u;
+  // No cross-lane ops or LDS: a wave64 on a 32-wide host runs one lane per invocation.
+  const auto halves = 1u;
   Require(test.name, "direct dynamic offset", tools.Disassemble(compiled.spirv, &text) &&
               CountText(text, "OpImageSampleExplicitLod") == halves &&
               CountText(text, "OpBitFieldSExtract %int") == 2u * halves,
