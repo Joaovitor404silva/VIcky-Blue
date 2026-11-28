@@ -1,4 +1,5 @@
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
+
 #include "graphics/shader/recompiler/ShaderCalls.h"
 #include "graphics/shader/recompiler/Tessellation.h"
 
@@ -592,7 +593,7 @@ TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileO
 	     static_cast<uint64_t>(ir.blocks.size()), phase_ms());
 	IR::RewriteToSsa(ir.blocks);
 	const auto simplify = [&ir] {
-		IR::ConstantPropagationPass(ir.blocks, ir.wave_size);
+		IR::ConstantPropagationPass(ir.blocks, ir.wave_size, false);
 		IR::RemoveIdentities(ir);
 		IR::EliminateDeadCode(ir.blocks);
 	};
@@ -681,6 +682,14 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 			LOGF("ShaderRecompiler %s ray query traversals: hash=0x%016" PRIx64 " loops=%u\n",
 			     stage, ir.shader_hash, traced);
 		}
+	}
+	const auto* workgroup = ShaderWorkgroupInput(ir.stage, options.input_info);
+	const bool  single_lane =
+	    !(workgroup != nullptr && ir.wave_size == 64u && workgroup->host_subgroup_size == 32u);
+	if (IR::LowerDivergentExecRegions(ir, single_lane)) {
+		IR::ConstantPropagationPass(ir.blocks, ir.wave_size);
+		IR::RemoveIdentities(ir);
+		IR::EliminateDeadCode(ir.blocks);
 	}
 
 	IR::CollectShaderInfo(ir, options.input_info);
